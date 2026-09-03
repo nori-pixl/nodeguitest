@@ -1,25 +1,49 @@
 {
-  "name": "norimemo-app",
+  "name": "memo-app",
   "version": "1.0.0",
+  "description": "メモ帳 (Electron版)",
   "main": "main.js",
+  "author": "nori-pixl",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder"
-  },
-  "build": {
-    "appId": "com.noripixl.qnotepad",
-    "productName": "noriメモ帳",
-    "win": {
-      "target": "nsis"
-    },
-    "nsis": {
-      "oneClick": true,
-      "allowToChangeInstallationDirectory": false,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true
-    }
+    "dist": "electron-builder",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
   },
   "devDependencies": {
-    "electron": "^30.0.0"
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.noripixl.memoapp",
+    "productName": "メモ帳",
+    "files": [
+      "main.js",
+      "index.html",
+      "memo.png"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis",
+      "icon": "memo.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "memo.png"
+    },
+    "linux": {
+      "target": ["AppImage", "deb"],
+      "icon": "memo.png",
+      "category": "Utility"
+    }
   }
 }
