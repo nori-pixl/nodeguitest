@@ -1,12 +1,25 @@
 {
-  "name": "my-electron-app",
+  "name": "norimemo-app",
   "version": "1.0.0",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.noripixl.qnotepad",
+    "productName": "noriメモ帳",
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
   },
   "devDependencies": {
-    "electron": "^x.x.x"
+    "electron": "^30.0.0"
   }
 }
