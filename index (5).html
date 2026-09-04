@@ -1,0 +1,2777 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>メモ帳 − nori-pixl</title>
+
+    <!-- ================= Electron用: alert/confirm/prompt をネイティブダイアログに差し替え =================
+         Electron(main.js + ipcMain)経由の環境でのみ有効化される。
+         通常のブラウザ／WebView（Chrome, Median.co等）ではrequireが存在しないため、
+         このブロックは何もせず、従来通りの window.alert/confirm/prompt がそのまま使われる。 -->
+    <script>
+    (function () {
+        if (typeof require !== 'function') return; // Electronでなければ何もしない
+        try {
+            const { ipcRenderer } = require('electron');
+            if (!ipcRenderer) return;
+
+            window.alert = function (message) {
+                return ipcRenderer.sendSync('sync-alert', String(message));
+            };
+            window.confirm = function (message) {
+                return ipcRenderer.sendSync('sync-confirm', String(message));
+            };
+            window.prompt = function (message, defaultValue) {
+                return ipcRenderer.sendSync('sync-prompt', {
+                    message: String(message == null ? '' : message),
+                    defaultValue: (defaultValue == null ? '' : String(defaultValue))
+                });
+            };
+        } catch (e) {
+            // requireはあるがelectronモジュールが取得できない環境（保険）
+        }
+    })();
+    </script>
+
+    <link rel="icon" href="memo.png" type="image/png">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/turndown/7.1.2/turndown.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.47.0/min/vs/loader.min.js"></script>
+    <style>
+        :root { --bg-color: #ffffff; --text-color: #333333; --sidebar-bg: #f0f2f5; --active-blue: #0078d4; --app-scale: 1 }
+        /* 全体サイズをまとめて調整したいときはこの --app-scale の値だけ変更してください（例: 0.85 や 1.2） */
+        html { zoom: var(--app-scale); }
+        .dark-mode { --bg-color: #1e1e1e; --text-color: #e0e0e0; --sidebar-bg: #2d2d2d; --active-blue: #005a9e; }
+        body { margin: 0; display: flex; flex-direction: column; height: 100vh; height: 100dvh; font-family: sans-serif; background-color: var(--bg-color); color: var(--text-color); overflow: hidden; }
+
+        .toolbar { background-color: #0078d4; color: white; padding: 8px; display: flex; align-items: center; gap: 8px; z-index: 100; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+        .toolbar button { background: rgba(255,255,255,0.2); border: none; color: white; padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold; }
+
+        .format-group { display: flex; gap: 4px; background: rgba(0,0,0,0.1); padding: 4px; border-radius: 8px; }
+        input[type="color"] { width: 30px; height: 30px; border: none; padding: 0; background: none; cursor: pointer; }
+
+        /* --- 上部メニューバー（設定モーダルを廃止し、ここに統一） --- */
+        .menu-bar { display: flex; align-items: stretch; height: 40px; background: var(--sidebar-bg); border-bottom: 1px solid #ccc; padding: 0 4px; position: relative; z-index: 150; flex-shrink: 0; overflow-x: auto; overflow-y: visible; }
+        .menu-container { position: relative; display: flex; align-items: stretch; }
+        .menu-item { display: flex; align-items: center; padding: 0 14px; cursor: pointer; font-size: 14px; color: var(--text-color); white-space: nowrap; user-select: none; line-height: 1.2; }
+        .menu-item:hover, .menu-item.active { background: rgba(0,120,212,0.15); }
+        .dropdown { display: none; position: fixed; background: var(--bg-color); color: var(--text-color); border: 1px solid #ccc; border-radius: 6px; box-shadow: 0 8px 20px rgba(0,0,0,0.25); min-width: 230px; max-height: 80vh; overflow-y: auto; z-index: 500; padding: 6px; flex-direction: column; }
+        .dropdown.show { display: flex; }
+        .dropdown button { text-align: left; background: none; border: none; padding: 9px 10px; font-size: 13px; cursor: pointer; color: inherit; border-radius: 4px; font-family: inherit; }
+        .dropdown button:hover { background: rgba(0,120,212,0.12); }
+        .dropdown-sep { height: 1px; background: #ddd; margin: 4px 2px; }
+        .dropdown-sub { display: flex; flex-direction: column; border-top: 1px dashed #ccc; border-bottom: 1px dashed #ccc; padding: 4px 0; margin: 2px 0; }
+        /* 右クリックメニューはサイドバー(z-index:1000)より必ず手前に出す */
+        #custom-context-menu { z-index: 1200; }
+        .dropdown-sub > .sub-label { font-size: 11px; color: #888; padding: 4px 10px; }
+        .arrow-pad { display: grid; grid-template-columns: repeat(3, 34px); grid-template-rows: repeat(3, 34px); gap: 3px; justify-content: center; margin: 6px 0; }
+        .arrow-pad button { background: rgba(0,0,0,0.08); border: none; border-radius: 4px; cursor: pointer; font-size: 15px; padding: 0; }
+
+        .side-panel {
+            display: none; position: fixed; top: 60px; right: 10px; z-index: 1300;
+            background: var(--bg-color); color: var(--text-color);
+            border: 1px solid #ccc; border-radius: 8px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+            padding: 10px; width: 280px; max-width: 92vw;
+            max-height: 75vh; overflow-y: auto;
+        }
+        .side-panel.show { display: block; }
+        .side-panel input[type="text"] { padding: 6px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; }
+        .side-panel button { padding: 6px 10px; font-size: 12px; border: none; border-radius: 4px; background: rgba(0,120,212,0.15); cursor: pointer; color: inherit; }
+        .side-panel button:hover { background: rgba(0,120,212,0.3); }
+        .search-hit-row, .version-row {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 6px 4px; border-bottom: 1px solid #eee; font-size: 12px; cursor: pointer;
+        }
+        .search-hit-row:hover, .version-row:hover { background: rgba(0,120,212,0.08); }
+
+        .main-container { display: flex; flex-grow: 1; position: relative; overflow: hidden; }        .sidebar {
+            width: 280px;
+            background-color: var(--sidebar-bg);
+            border-right: 1px solid #ccc;
+            padding: 15px;
+            overflow-y: auto;
+            box-sizing: border-box;
+            position: absolute;
+            top: 0; bottom: 0; left: 0;
+            z-index: 1000;
+            transition: transform 0.3s ease, width 0.3s ease, padding 0.3s ease;
+        }
+        .sidebar.hidden { transform: translateX(-100%); }
+
+        @media (min-width: 768px) {
+            .sidebar { position: relative; transform: none; }
+            .sidebar.hidden {
+                width: 0;
+                padding-left: 0;
+                padding-right: 0;
+                border-right: none;
+                overflow: hidden;
+                transform: none;
+            }
+            .overlay { display: none !important; }
+        }
+
+        .editor-area { flex-grow: 1; display: flex; flex-direction: column; width: 100%; background-color: var(--bg-color); min-width: 0; }
+
+        .editor-group { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+        .editor-row { display: flex; flex: 1; min-height: 0; width: 100%; }
+        .editor-row .editor-area { flex: 1 1 0; min-width: 0; }
+
+        .tab-bar { display: flex; align-items: stretch; background: var(--sidebar-bg); border-bottom: 1px solid #ccc; overflow-x: auto; flex-shrink: 0; height: 36px; }
+        .tab-strip { display: flex; align-items: stretch; flex: 1 1 0; min-width: 0; overflow-x: auto; }
+        .tab-strip-divider { width: 4px; background: #ccc; flex-shrink: 0; }
+        .tab { display: flex; align-items: center; gap: 6px; padding: 0 10px; height: 36px; font-size: 12px; white-space: nowrap; cursor: pointer; border-right: 1px solid #ddd; background: transparent; color: var(--text-color); box-sizing: border-box; }
+        .tab.active { background: var(--bg-color); border-bottom: 2px solid var(--active-blue); font-weight: bold; }
+        .tab .tab-close { opacity: 0.55; padding: 2px 4px; border-radius: 3px; }
+        .tab .tab-close:hover { opacity: 1; background: rgba(0,0,0,0.12); }
+        .tab-group { display: flex; align-items: center; gap: 2px; padding: 3px 6px; margin: 3px 3px; border-radius: 6px; }
+        .tab-group .tab { border-right: none; border-radius: 4px; margin: 0 1px; height: 26px; background: rgba(255,255,255,0.5); }
+        .tab-group .group-add { padding: 0 8px; cursor: pointer; opacity: 0.75; font-weight: bold; }
+        .tab-group .group-add:hover { opacity: 1; }
+        .tab-group .group-color-input { width: 16px; height: 16px; padding: 0; border: none; cursor: pointer; margin-right: 4px; }
+
+        .split-pane { display: none; flex-direction: column; flex: 1 1 0; min-width: 0; border-left: 1px solid #ccc; }
+        .split-pane.show { display: flex; }
+        #split-memo { flex-grow: 1; padding: 20px; outline: none; overflow-y: auto; font-size: 18px; line-height: 1.6; word-wrap: break-word; }
+
+        .tile-picker-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 2000; display: flex; align-items: center; justify-content: center; }
+        .tile-picker-box { background: var(--bg-color); color: var(--text-color); border-radius: 10px; padding: 16px; width: 90vw; max-width: 480px; max-height: 80vh; overflow-y: auto; }
+        .tile-picker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; }
+        .tile-item { border: 1px solid #ccc; border-radius: 8px; padding: 12px 8px; text-align: center; cursor: pointer; font-size: 12px; background: rgba(0,0,0,0.03); word-break: break-all; }
+        .tile-item:hover { background: rgba(0,120,212,0.15); }
+
+        .editor-body { display: flex; flex-grow: 1; min-height: 0; width: 100%; box-sizing: border-box; overflow: hidden; }
+        .editor-area.print-mode .editor-body { justify-content: center; overflow-y: auto; }
+        .editor-body.print-active .line-gutter { display: none; }
+
+        .line-gutter {
+            flex-shrink: 0; box-sizing: border-box;
+            background: var(--sidebar-bg); color: #888888aa;
+            text-align: right; padding: 20px 8px 20px 0;
+            overflow: hidden; user-select: none; -webkit-user-select: none;
+            border-right: 1px solid #ccc; white-space: pre;
+            font-size: 18px; line-height: 1.6;
+        }
+        .line-gutter div { padding-right: 2px; }
+        .line-gutter.hidden { display: none; }
+
+        #memo {
+            flex-grow: 1; padding: 20px; outline: none; overflow-y: auto;
+            font-size: 18px; line-height: 1.6; word-wrap: break-word;
+            -webkit-user-select: text; user-select: text;
+        }
+        #memo:empty:before { content: "ここをタップして入力..."; color: gray; }
+        #memo h1, #memo h2, #memo h3 { margin: 0.4em 0; line-height: 1.3; }
+        #memo ul, #memo ol { margin: 0.4em 0; padding-left: 1.6em; }
+        .todo-checkbox { width: 18px; height: 18px; vertical-align: middle; margin-right: 2px; cursor: pointer; }
+
+        .md-split { display: none; flex: 1; min-height: 0; width: 100%; flex-direction: row; }
+        .md-split.show { display: flex; }
+        .monaco-container { display: none; flex-grow: 1; min-height: 0; width: 100%; }
+        .monaco-container.show { display: block; }
+        @media (max-width: 767px) {
+            .md-split.show { flex-direction: column; }
+        }
+        .md-pane { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; box-sizing: border-box; padding: 16px; font-size: 16px; line-height: 1.6; }
+        #markdown-source {
+            border: none; outline: none; resize: none; font-family: monospace;
+            background: var(--bg-color); color: var(--text-color);
+            border-right: 1px solid #ccc;
+        }
+        #markdown-preview { background: var(--bg-color); border-top: none; }
+        #markdown-preview h1, #markdown-preview h2, #markdown-preview h3 { margin: 0.4em 0; }
+        .md-todo-item { display: flex; align-items: flex-start; gap: 6px; margin: 4px 0; }
+        .md-todo-item input[type="checkbox"] { margin-top: 4px; }
+        @media (max-width: 767px) {
+            #markdown-source { border-right: none; border-bottom: 1px solid #ccc; }
+        }
+
+        /* --- 印刷メモ帳モード（印刷用紙のアスペクト比：A4=210:297） --- */
+        .editor-area.print-mode { background: #7d7d7d; align-items: flex-start; justify-content: center; overflow-y: auto; padding: 20px; }
+        .editor-area.print-mode #memo {
+            background: #fff; color: #111;
+            width: 210mm; max-width: 92vw;
+            aspect-ratio: 210 / 297;
+            flex-grow: 0; flex-shrink: 0; align-self: flex-start; margin: 0 auto;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.35);
+            box-sizing: border-box;
+            overflow-x: hidden; overflow-y: auto;
+            word-wrap: break-word; overflow-wrap: break-word;
+        }
+        .editor-area.print-mode #memo img,
+        .editor-area.print-mode #memo .resizable-box,
+        .editor-area.print-mode #memo table {
+            max-width: 100%;
+        }
+
+        .ruler-bar {
+            display: none;
+            height: 16px;
+            background: #e9e9e9;
+            border-bottom: 2px solid #c8c8c8;
+            overflow: hidden;
+            flex-shrink: 0;
+            text-align: center;
+            position: relative;
+        }
+        .ruler-bar.show { display: flex; }
+        .ruler-marker {
+            position: absolute;
+            top: 0;
+            width: 0; height: 0;
+            transform: translateX(-7px);
+            cursor: ew-resize;
+            z-index: 60;
+            touch-action: none;
+        }
+        .ruler-marker-left { border-left: 7px solid transparent; border-right: 7px solid transparent; border-top: 14px solid #0078d4; }
+        .ruler-marker-right { border-left: 7px solid transparent; border-right: 7px solid transparent; border-top: 14px solid #d9534f; }
+        @media (max-width: 767px) {
+            .ruler-bar.show { display: none !important; }
+        }
+        .ruler-tick {
+            flex: 0 0 auto;
+            border-right: 1px solid #bbb;
+            box-sizing: border-box;
+            font-size: 10px;
+            color: #666;
+            padding-left: 3px;
+            position: relative;
+        }
+        .ruler-tick::after {
+            content: '';
+            position: absolute;
+            right: -1px;
+            bottom: 0;
+            width: 1px;
+            height: 6px;
+            background: #999;
+        }
+.vertical-text {
+  writing-mode: vertical-rl;  /* 文字を縦書き（右から左）にする */
+  text-orientation: upright;  /* 英数字や記号も倒さず縦向き（直立）にする */
+}
+
+        .footer { display: flex; justify-content: space-between; padding: 8px 15px; background: var(--sidebar-bg); font-size: 14px; border-top: 1px solid #ccc; flex-shrink: 0; }
+        .overlay { display: none; position: absolute; inset: 0; background: rgba(0,0,0,0.5); z-index: 900; pointer-events: auto; }
+        .overlay.show { display: block; }
+        .overlay:not(.show) { display: none !important; pointer-events: none; }
+
+        .resizable-box { position: relative; display: inline-block; vertical-align: middle; margin: 2px; cursor: grab; }
+        .resizable-box > img, .resizable-box > svg { width: 100%; height: 100%; display: block; }
+        .resizable-box.selected { outline: 2px dashed #0078d4; outline-offset: 2px; }
+
+        #shape-handles { position: fixed; z-index: 600; }
+        .rs-handle { position: fixed; width: 14px; height: 14px; margin: -7px; background: #0078d4; border: 2px solid white; border-radius: 3px; box-shadow: 0 1px 3px rgba(0,0,0,0.4); z-index: 600; touch-action: none; }
+        .rs-handle.e { cursor: ew-resize; }
+        .rs-handle.s { cursor: ns-resize; }
+        .rs-handle.se { cursor: nwse-resize; }
+        .rs-handle.rot { border-radius: 50%; background: #28a745; display: flex; align-items: center; justify-content: center; color: #fff; font-size: 11px; cursor: grab; }
+
+        @media print {
+            .toolbar, .menu-bar, .sidebar, .overlay, .footer, .ruler-bar, #shape-handles, .line-gutter, #custom-context-menu, .side-panel, .md-split, .monaco-container, .tab-bar, .split-pane, .tile-picker-overlay { display: none !important; }
+            .main-container, .editor-area, .editor-body { overflow: visible !important; height: auto !important; display: block !important; }
+            #memo { box-shadow: none !important; width: auto !important; max-width: 210mm; margin: 0 auto; aspect-ratio: auto !important; overflow: visible !important; height: auto !important; }
+            .resizable-box.selected { outline: none !important; }
+            body { overflow: visible !important; height: auto !important; }
+        }
+    </style>
+</head>
+<body>
+<div class="toolbar">
+    <button onclick="toggleSidebar()">☰</button>
+    <div class="format-group">
+        <button class="format-btn"
+                onpointerdown="event.preventDefault(); execCmd('bold');"
+                unselectable="on">B</button>
+        <button class="format-btn"
+                onpointerdown="event.preventDefault(); execCmd('italic');"
+                style="font-style: italic;"
+                unselectable="on">I</button>
+        <input type="color"
+               onchange="execCmd('foreColor', this.value)"
+               onpointerdown="event.preventDefault();">
+    </div>
+    
+    <div style="display:flex; align-items:center; gap:5px; background:rgba(0,0,0,0.1); padding:4px 8px; border-radius:8px;">
+        <span style="font-size:12px;">A</span>
+        <input type="range" id="global-size-slider" min="12" max="60" value="18"
+               oninput="changeGlobalFontSize(this.value)"
+               style="width: 70px; cursor: pointer;">
+        <span style="font-size:18px;">A</span>
+    </div>
+    <div style="flex-grow:1"></div>
+    <button onclick="exportAllData()">保存</button>
+</div>
+
+<div class="menu-bar" id="menu-bar">
+    <div class="menu-container">
+        <div class="menu-item" onclick="toggleMenu('file-menu', this)">ファイル</div>
+        <div class="dropdown" id="file-menu">
+            <button onclick="saveAsText()">テキストとして保存</button>
+            <button onclick="saveAsPNG()">画像として保存（PNG）</button>
+            <button onclick="exportAsMarkdown()">Markdownとしてエクスポート</button>
+            <button onclick="triggerImportMarkdown()">Markdownを開く（新規ファイル）</button>
+            <div class="dropdown-sep"></div>
+            <button onclick="printFile()">印刷</button>
+            <button onclick="showPreview()">プレビュー</button>
+            <div class="dropdown-sep"></div>
+            <button onclick="shareCurrentFile()">共有</button>
+            <div class="dropdown-sep"></div>
+            <button onclick="downloadCurrentFolderAsPDF()">このフォルダをPDFでダウンロード</button>
+            <button onclick="printCurrentFolder()">このフォルダを印刷</button>
+            <div class="dropdown-sep"></div>
+            <button onclick="openJSON()">JSONを開く</button>
+            <button onclick="sendEmailCurrent()">メールを送信（現在のファイル）</button>
+            <div class="dropdown-sep"></div>
+            <button onclick="openVersionHistory()">バージョン履歴</button>
+        </div>
+    </div>
+
+    <div class="menu-container">
+        <div class="menu-item" onclick="toggleMenu('view-menu', this)">表示</div>
+        <div class="dropdown" id="view-menu">
+            <button onclick="zoomIn()">拡大</button>
+            <button onclick="zoomOut()">縮小</button>
+            <button onclick="zoomReset()">100%</button>
+            <div class="dropdown-sep"></div>
+            <button id="menu-statusbar-toggle" onclick="toggleStatusBarMenu()">ステータスバーの表示</button>
+            <button id="menu-darkmode-toggle" onclick="toggleDarkModeMenu()">ダークモード</button>
+            <button id="menu-tabmode-toggle" onclick="toggleTabMode()">タブモードの表示</button>
+            <button id="menu-ruler-toggle" onclick="toggleRulerMenu()">ルーラーの表示</button>
+            <button id="menu-linenum-toggle" onclick="toggleLineNumbersMenu()">左に行番号を表示</button>
+            <button id="menu-printmode-toggle" onclick="togglePrintModeMenu()">印刷メモ帳を有効にする</button>
+            <button id="menu-bullet-toggle" onclick="toggleBulletMenu()">Enterキーで「・」を自動追加</button>
+            <div class="dropdown-sep"></div>
+            <button id="menu-markdown-toggle" onclick="toggleMarkdownMode()">Markdownモード</button>
+            <button id="menu-monaco-toggle" onclick="toggleMonacoMode()">Monacoエディターモード</button>
+            <button id="menu-todo-toggle" onclick="toggleTodoListDisplay()">ToDoリスト表示</button>
+            <div class="dropdown-sub">
+                <div class="sub-label">並び替え</div>
+                <button onclick="setSortBy('name')">名前順</button>
+                <button onclick="setSortBy('updated')">更新日時順（新しい順）</button>
+                <button onclick="setSortBy('tags')">タグ順</button>
+            </div>
+            <div class="dropdown-sub">
+                <div class="sub-label">フォント</div>
+                <button onclick="setFont('sans-serif')">ゴシック体（標準）</button>
+                <button onclick="setFont('\'Yu Gothic\', \'Hiragino Kaku Gothic ProN\', sans-serif')">游ゴシック</button>
+                <button onclick="setFont('\'Yu Mincho\', \'Hiragino Mincho ProN\', serif')">明朝体</button>
+                <button onclick="setFont('\'UD Digi Kyokasho NK-R\', sans-serif')">教科書体風</button>
+                <button onclick="setFont('monospace')">等幅（コード風）</button>
+                <button onclick="setFont('cursive')">手書き風</button>
+            </div>
+            <div class="dropdown-sub">
+                <div class="sub-label">キーボードの種類</div>
+                <button onclick="setKeyboard('text')">通常（文字）</button>
+                <button onclick="setKeyboard('numeric')">数字</button>
+                <button onclick="setKeyboard('tel')">電話番号</button>
+                <button onclick="setKeyboard('email')">メールアドレス</button>
+                <button onclick="setKeyboard('url')">URL</button>
+                <button onclick="setKeyboard('decimal')">小数</button>
+                <button onclick="setKeyboard('search')">検索</button>
+                <button onclick="setKeyboard('none')">キーボードを表示しない</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="menu-container">
+        <div class="menu-item" onclick="toggleMenu('insert-menu', this)">挿入</div>
+        <div class="dropdown" id="insert-menu">
+            <button onclick="triggerInsertImage()">画像挿入</button>
+            <div class="dropdown-sub">
+                <div class="sub-label">図形</div>
+                <button onclick="insertShapeSVG('rect')">四角形</button>
+                <button onclick="insertShapeSVG('circle')">円</button>
+                <button onclick="insertShapeSVG('triangle')">三角形</button>
+                <button onclick="insertShapeSVG('line')">線</button>
+                <button onclick="insertShapeSVG('arrow')">矢印</button>
+            </div>
+            <div class="dropdown-sub">
+                <div class="sub-label">図形の色（新規挿入 / 選択中に適用）</div>
+                <div style="display:flex; align-items:center; gap:8px; padding:4px 10px;">
+                    <input type="color" id="shape-color-input" value="#4da3ff" onchange="applyColorToSelectedShape()">
+                    <button style="padding:6px 10px;" onclick="applyColorToSelectedShape()">選択中の図形に適用</button>
+                </div>
+            </div>
+            <button onclick="triggerInsertChart()">グラフ（エクセル経由）</button>
+            <div class="dropdown-sub">
+                <div class="sub-label">Markdown書式</div>
+                <button onclick="applyHeading(1)">見出し1</button>
+                <button onclick="applyHeading(2)">見出し2</button>
+                <button onclick="applyHeading(3)">見出し3</button>
+                <button onclick="applyBulletList()">箇条書きリスト</button>
+                <button onclick="applyNumberedList()">番号付きリスト</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="menu-container">
+        <div class="menu-item" onclick="toggleMenu('edit-menu', this)">操作</div>
+        <div class="dropdown" id="edit-menu">
+            <button id="selection-toggle-btn" onclick="toggleSelectionMode()"><span id="selection-mode-label">選択を開始</span></button>
+            <div class="arrow-pad">
+                <div></div><button onclick="moveOrExtend('up')">↑</button><div></div>
+                <button onclick="moveOrExtend('left')">←</button><div></div><button onclick="moveOrExtend('right')">→</button>
+                <div></div><button onclick="moveOrExtend('down')">↓</button><div></div>
+            </div>
+            <div class="dropdown-sep"></div>
+            <button onclick="doCut()">切り取り</button>
+            <button onclick="doCopy()">コピー</button>
+            <button onclick="doPaste()">貼り付け</button>
+            <button onclick="doDelete()">削除</button>
+            <div class="dropdown-sep"></div><button
+                onclick="undoAction()"
+                >戻る</button>
+        <button 
+                onclick="redoAction()"
+                >進む</button>
+            <div class="dropdown-sep"></div>
+            <button onclick="hideContextMenu(); openSearchPanel();">検索・置換</button>
+        </div>
+    </div>
+</div>
+
+<div class="main-container">
+    <div class="overlay" id="overlay" onclick="toggleSidebar()"></div>
+    <div class="sidebar" id="sidebar">
+
+        <button style="width:100%; padding:10px; margin-bottom:10px;" onclick="addFolder()">＋ 新規フォルダ</button>
+        <div id="tree-container"></div>
+    </div>
+    <div class="editor-group" id="editor-group">
+        <div id="tab-bar" class="tab-bar" style="display:none;">
+            <div class="tab-strip" id="tab-strip-main" oncontextmenu="event.preventDefault(); showTabBarContextMenu(event, 'main');"></div>
+            <div class="tab-strip-divider" id="tab-strip-divider" style="display:none;"></div>
+            <div class="tab-strip" id="tab-strip-split" style="display:none;" oncontextmenu="event.preventDefault(); showTabBarContextMenu(event, 'split');"></div>
+        </div>
+        <div class="editor-row" id="editor-row">
+            <div class="editor-area" id="editor-area">
+                <div class="ruler-bar" id="ruler-bar">
+                    <div class="ruler-marker ruler-marker-left" id="ruler-marker-left" title="左インデント"></div>
+                    <div class="ruler-marker ruler-marker-right" id="ruler-marker-right" title="右インデント"></div>
+                </div>
+                <div class="editor-body" id="editor-body">
+                    <div class="line-gutter hidden" id="line-gutter"></div>
+                    <div id="memo" contenteditable="true"></div>
+                    <div class="md-split" id="md-split">
+                        <textarea id="markdown-source" class="md-pane" placeholder="ここにMarkdownを入力..." oninput="onMarkdownSourceInput()"></textarea>
+                        <div id="markdown-preview" class="md-pane md-preview"></div>
+                    </div>
+                    <div id="monaco-container" class="monaco-container"></div>
+                </div>
+                <div class="footer" id="footer">
+                    <span id="current-display">ファイル未選択</span>
+                    <span id="char-count">0 文字</span>
+                </div>
+            </div>
+            <div class="split-pane" id="split-pane">
+                <div id="split-memo" contenteditable="true" class="split-memo"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- タイル状のファイル／タブ選択モーダル（分割・グループ化で使用） -->
+<div id="tile-picker-modal" class="tile-picker-overlay" style="display:none;" onclick="if(event.target===this) closeTilePicker();">
+    <div class="tile-picker-box">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+            <b id="tile-picker-title">ファイルを選択</b>
+            <button onclick="closeTilePicker()">✕</button>
+        </div>
+        <div id="tile-picker-grid" class="tile-picker-grid"></div>
+    </div>
+</div>
+
+
+<!-- 右クリックメニュー（フォルダ / ファイル / エディター / 空欄 共通） -->
+<div class="dropdown" id="custom-context-menu" style="min-width:180px;"></div>
+
+<!-- 検索・置換パネル -->
+<div class="side-panel" id="search-panel">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <b>検索・置換</b>
+        <button onclick="closeSearchPanel()">✕</button>
+    </div>
+    <div style="display:flex; gap:6px; margin-bottom:6px;">
+        <input type="text" id="search-input" placeholder="検索する文字列" style="flex:1;" oninput="runSearch()">
+    </div>
+    <input type="text" id="replace-input" placeholder="置換後の文字列" style="width:100%; margin-bottom:6px;">
+    <div style="display:flex; gap:4px; flex-wrap:wrap; margin-bottom:6px;">
+        <button onclick="searchPrev()">◀ 前へ</button>
+        <button onclick="searchNext()">次へ ▶</button>
+        <button onclick="replaceCurrentMatch()">置換</button>
+        <button onclick="replaceAllMatches()">すべて置換</button>
+    </div>
+    <div id="search-status" style="font-size:12px; color:#888; margin-bottom:8px;"></div>
+    <div style="border-top:1px solid #ddd; padding-top:8px;">
+        <button style="width:100%;" onclick="runGlobalSearch()">全ファイルから検索</button>
+        <div id="global-search-results" style="margin-top:6px;"></div>
+    </div>
+</div>
+
+<!-- バージョン履歴パネル -->
+<div class="side-panel" id="version-panel">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+        <b>バージョン履歴</b>
+        <button onclick="closeVersionHistory()">✕</button>
+    </div>
+    <div id="version-list" style="font-size:12px; color:#888;"></div>
+</div>
+
+<!-- 図形/画像のリサイズハンドル（コンテンツ本体には含めない） -->
+<div id="shape-handles" style="display:none;">
+    <div class="rs-handle e" data-pos="e"></div>
+    <div class="rs-handle s" data-pos="s"></div>
+    <div class="rs-handle se" data-pos="se"></div>
+    <div class="rs-handle rot" data-pos="rot" title="ドラッグして回転">⟳</div>
+</div>
+
+<!-- 隠しファイル入力群 -->
+<input type="file" id="json-file-input" accept=".json" style="display:none" onchange="handleJsonOpen(event)">
+<input type="file" id="image-insert-input" accept="image/*" style="display:none" onchange="handleImageInsert(event)">
+<input type="file" id="excel-chart-input" accept=".xlsx,.xls,.csv" style="display:none" onchange="handleExcelChart(event)">
+<input type="file" id="md-file-input" accept=".md,.markdown,text/markdown" style="display:none" onchange="handleMarkdownImport(event)">
+
+<script>
+    let db = JSON.parse(localStorage.getItem('memo_db_v8')) || { "メモ": { "はじめて": "文字を選択してBを押してね" } };
+    let currentPath = JSON.parse(localStorage.getItem('last_path_v8')) || { folder: "", file: "" };
+    const DEFAULT_FILE_SETTINGS = {
+        font: "sans-serif",
+        fontSize: 18,
+        bulletOnEnter: false,
+        keyboard: "text",
+        rulerEnabled: false,
+        printNotebook: false,
+        lineNumbers: false,
+        markdownMode: false,
+        todoListDisplay: false,
+        monacoMode: false,
+        monacoExt: '',
+        monacoLang: '',
+        monacoSource: ''
+    };
+    let appSettings = JSON.parse(localStorage.getItem('memo_settings_v1')) || {
+        statusBarVisible: true,
+        sortBy: "name",
+        defaultFileSettings: Object.assign({}, DEFAULT_FILE_SETTINGS)
+    };
+    if (typeof appSettings.sortBy !== 'string') appSettings.sortBy = 'name';
+    if (typeof appSettings.statusBarVisible !== 'boolean') appSettings.statusBarVisible = true;
+    if (typeof appSettings.darkMode !== 'boolean') appSettings.darkMode = false;
+    if (!appSettings.defaultFileSettings) appSettings.defaultFileSettings = Object.assign({}, DEFAULT_FILE_SETTINGS);
+    else appSettings.defaultFileSettings = Object.assign({}, DEFAULT_FILE_SETTINGS, appSettings.defaultFileSettings);
+    let zoomLevel = 100;
+    let selectionMode = false;
+    let selectedBox = null;
+    let draggedBox = null;
+    let itemClipboard = null; // { type: 'folder'|'file', name, folder?, data }
+
+    const memo = document.getElementById('memo');
+    const splitMemo = document.getElementById('split-memo');
+    if (splitMemo) {
+        splitMemo.addEventListener('input', () => {
+            const item = tabState.split && tabState.split.currentItem;
+            if (!item) return;
+            setFileContent(item.folder, item.file, splitMemo.innerHTML);
+            localStorage.setItem('memo_db_v8', JSON.stringify(db));
+            if (currentPath.folder === item.folder && currentPath.file === item.file) {
+                memo.innerHTML = splitMemo.innerHTML;
+                updateCharCount();
+                updateLineNumbers();
+            }
+        });
+        splitMemo.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            showEditorContextMenu(e);
+        });
+    }
+
+    /* ================= データモデル（ファイル＝{content,tags,updatedAt,history,settings}） ================= */
+    function migrateDb() {
+        for (const folder in db) {
+            for (const file in db[folder]) {
+                const v = db[folder][file];
+                if (typeof v === 'string') {
+                    db[folder][file] = { content: v, tags: [], updatedAt: Date.now(), history: [], settings: Object.assign({}, appSettings.defaultFileSettings) };
+                } else if (v && typeof v === 'object') {
+                    if (typeof v.content !== 'string') v.content = '';
+                    if (!Array.isArray(v.tags)) v.tags = [];
+                    if (typeof v.updatedAt !== 'number') v.updatedAt = Date.now();
+                    if (!Array.isArray(v.history)) v.history = [];
+                    if (!v.settings || typeof v.settings !== 'object') v.settings = Object.assign({}, appSettings.defaultFileSettings);
+                    else v.settings = Object.assign({}, appSettings.defaultFileSettings, v.settings);
+                } else {
+                    db[folder][file] = { content: '', tags: [], updatedAt: Date.now(), history: [], settings: Object.assign({}, appSettings.defaultFileSettings) };
+                }
+            }
+        }
+    }
+    migrateDb();
+    function getFileMeta(folder, file) {
+        if (!db[folder] || db[folder][file] === undefined) return null;
+        let v = db[folder][file];
+        if (typeof v === 'string') v = db[folder][file] = { content: v, tags: [], updatedAt: Date.now(), history: [], settings: Object.assign({}, appSettings.defaultFileSettings) };
+        if (!v.settings) v.settings = Object.assign({}, appSettings.defaultFileSettings);
+        return v;
+    }
+    function getFileContent(folder, file) {
+        const m = getFileMeta(folder, file);
+        return m ? (m.content || '') : '';
+    }
+    function setFileContent(folder, file, html) {
+        const m = getFileMeta(folder, file);
+        if (!m) return;
+        m.content = html;
+        m.updatedAt = Date.now();
+        recordVersionSnapshot(m);
+    }
+    function makeFileEntry(html) {
+        return { content: html || '', tags: [], updatedAt: Date.now(), history: [], settings: Object.assign({}, appSettings.defaultFileSettings) };
+    }
+    function recordVersionSnapshot(meta) {
+        if (!Array.isArray(meta.history)) meta.history = [];
+        const last = meta.history[meta.history.length - 1];
+        const now = Date.now();
+        if (!last || (now - last.ts) > 60000) {
+            meta.history.push({ ts: now, content: meta.content });
+            if (meta.history.length > 30) meta.history.shift();
+        } else {
+            last.content = meta.content;
+            last.ts = now;
+        }
+    }
+
+    /* ================= 表示設定：現在開いているノートごとに保持 ================= */
+    function getCurrentFileSettings() {
+        if (!currentPath.file) return appSettings.defaultFileSettings;
+        const meta = getFileMeta(currentPath.folder, currentPath.file);
+        if (!meta) return appSettings.defaultFileSettings;
+        return meta.settings;
+    }
+    function persistCurrentFileSettings() {
+        if (currentPath.file) {
+            localStorage.setItem('memo_db_v8', JSON.stringify(db));
+        } else {
+            saveSettings();
+        }
+    }
+
+    function saveSettings() {
+        localStorage.setItem('memo_settings_v1', JSON.stringify(appSettings));
+    }
+
+    /* ================= 書式コマンド ================= */
+    function execCmd(command, value = null) {
+        if (!currentPath.file) return;
+        memo.focus();
+        document.execCommand(command, false, value);
+        setTimeout(() => {
+            memo.focus();
+            save();
+            updateCharCount();
+        }, 10);
+    }
+
+    function changeGlobalFontSize(size) {
+        const s = getCurrentFileSettings();
+        s.fontSize = Number(size);
+        memo.style.fontSize = size + "px";
+        persistCurrentFileSettings();
+        updateLineNumbers();
+    }
+
+    window.addEventListener('load', () => {
+        updateLineNumbers();
+    });
+
+    function updateCharCount() {
+        const s = getCurrentFileSettings();
+        let text;
+        if (s.markdownMode) {
+            text = (s.markdownSource || document.getElementById('markdown-source').value || "");
+        } else {
+            text = memo.innerText || "";
+        }
+        const count = text.replace(/[\n\r]/g, "").length;
+        document.getElementById('char-count').innerText = count + " 文字";
+    }
+
+    function save() {
+        if (currentPath.file && db[currentPath.folder]) {
+            const s = getCurrentFileSettings();
+            if (!s.markdownMode) {
+                setFileContent(currentPath.folder, currentPath.file, memo.innerHTML);
+            }
+        }
+        localStorage.setItem('memo_db_v8', JSON.stringify(db));
+        commitHistory();
+    }
+
+    /* ================= 独自の元に戻す／やり直し履歴（undoStack / redoStack） ================= */
+    let undoStack = [];
+    let redoStack = [];
+    let lastSnapshot = "";
+
+    function initHistoryForCurrentFile() {
+        undoStack = [];
+        redoStack = [];
+        lastSnapshot = memo.innerHTML;
+    }
+    function commitHistory() {
+        const html = memo.innerHTML;
+        if (html === lastSnapshot) return;
+        undoStack.push(lastSnapshot);
+        if (undoStack.length > 100) undoStack.shift();
+        redoStack = [];
+        lastSnapshot = html;
+    }
+    function applyHistorySnapshot(html) {
+        memo.innerHTML = html;
+        if (currentPath.file && db[currentPath.folder]) {
+            setFileContent(currentPath.folder, currentPath.file, memo.innerHTML);
+        }
+        localStorage.setItem('memo_db_v8', JSON.stringify(db));
+        updateCharCount();
+        updateLineNumbers();
+        deselectResizableBox();
+        memo.focus();
+    }
+    function undoAction() {
+        if (!currentPath.file) return;
+        commitHistory();
+        if (undoStack.length === 0) return;
+        redoStack.push(lastSnapshot);
+        const prev = undoStack.pop();
+        lastSnapshot = prev;
+        applyHistorySnapshot(prev);
+    }
+    function redoAction() {
+        if (!currentPath.file) return;
+        if (redoStack.length === 0) return;
+        undoStack.push(lastSnapshot);
+        const next = redoStack.pop();
+        lastSnapshot = next;
+        applyHistorySnapshot(next);
+    }
+
+    memo.addEventListener('input', () => {
+        save();
+        updateCharCount();
+        updateLineNumbers();
+    });
+
+    memo.addEventListener('scroll', () => {
+        const gutter = document.getElementById('line-gutter');
+        if (gutter) gutter.scrollTop = memo.scrollTop;
+    });
+
+    memo.addEventListener('beforeinput', (e) => {
+        if (e.inputType === 'historyUndo') { e.preventDefault(); undoAction(); }
+        else if (e.inputType === 'historyRedo') { e.preventDefault(); redoAction(); }
+    });
+
+    memo.addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showEditorContextMenu(e);
+    });
+
+    document.getElementById('sidebar').addEventListener('contextmenu', (e) => {
+        e.preventDefault();
+        showSidebarContextMenu(e);
+    });
+
+    memo.addEventListener('keydown', (e) => {
+        const ctrlOrCmd = e.ctrlKey || e.metaKey;
+        if (ctrlOrCmd && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+            e.preventDefault();
+            undoAction();
+            return;
+        }
+        if (ctrlOrCmd && ((e.key === 'y' || e.key === 'Y') || (e.shiftKey && (e.key === 'z' || e.key === 'Z')))) {
+            e.preventDefault();
+            redoAction();
+            return;
+        }
+        if (selectionMode && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+            e.preventDefault();
+            const map = { ArrowUp: 'up', ArrowDown: 'down', ArrowLeft: 'left', ArrowRight: 'right' };
+            moveOrExtend(map[e.key]);
+            return;
+        }
+        /* Android端末の一部WebViewはIME(Gboard等)のカーソル移動ボタンがcontenteditable内で
+           効かないことがあるため、矢印キーはJS側で確実にキャレットを動かす */
+        if (!selectionMode && !ctrlOrCmd && !e.altKey && !e.shiftKey &&
+            ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+            const sel = window.getSelection();
+            if (sel) {
+                e.preventDefault();
+                const dirMap = {
+                    ArrowLeft: ['backward', 'character'],
+                    ArrowRight: ['forward', 'character'],
+                    ArrowUp: ['backward', 'line'],
+                    ArrowDown: ['forward', 'line']
+                };
+                const [d, g] = dirMap[e.key];
+                sel.modify('move', d, g);
+                updateLineNumbers();
+            }
+            return;
+        }
+        if (e.key === 'Enter' && !e.shiftKey) {
+            if (e.isComposing || e.keyCode === 229) return; // IME変換確定のEnterはそのまま
+            e.preventDefault();
+            if (getCurrentFileSettings().bulletOnEnter) {
+                document.execCommand('insertHTML', false, '<br>・ ');
+            } else if (getCurrentFileSettings().todoListDisplay) {
+                document.execCommand('insertLineBreak');
+                document.execCommand('insertHTML', false,
+                    '<span class="todo-checkbox-wrap" contenteditable="false"><input type="checkbox" class="todo-checkbox" onclick="onInlineTodoClick(event)"></span>\u00A0');
+            } else {
+                document.execCommand('insertLineBreak');
+            }
+            save();
+            updateCharCount();
+            updateLineNumbers();
+            return;
+        }
+        if (e.key === 'Backspace' && !ctrlOrCmd && !e.shiftKey && !e.altKey) {
+            const sel = window.getSelection();
+            if (sel && sel.isCollapsed && sel.rangeCount) {
+                const range = sel.getRangeAt(0);
+                let node = range.startContainer;
+                let offset = range.startOffset;
+                let prevNode = null;
+                if (node.nodeType === 3 && offset === 0) {
+                    prevNode = node.previousSibling;
+                } else if (node.nodeType === 1) {
+                    prevNode = node.childNodes[offset - 1] || null;
+                }
+                if (prevNode && prevNode.nodeType === 3 && prevNode.textContent === '\u00A0') {
+                    prevNode = prevNode.previousSibling;
+                }
+                if (prevNode && prevNode.nodeType === 1 && prevNode.classList && prevNode.classList.contains('todo-checkbox-wrap')) {
+                    e.preventDefault();
+                    const wrap = prevNode;
+                    const nbspNode = (wrap.nextSibling && wrap.nextSibling.nodeType === 3 && wrap.nextSibling.textContent === '\u00A0') ? wrap.nextSibling : null;
+                    const brBefore = (wrap.previousSibling && wrap.previousSibling.nodeType === 1 && wrap.previousSibling.tagName === 'BR') ? wrap.previousSibling : null;
+                    if (nbspNode) nbspNode.remove();
+                    wrap.remove();
+                    if (brBefore) brBefore.remove();
+                    save();
+                    updateCharCount();
+                    updateLineNumbers();
+                    return;
+                }
+            }
+        }
+    });
+    function onInlineTodoClick(e) {
+        e.stopPropagation();
+        const cb = e.target;
+        if (cb.checked) cb.setAttribute('checked', ''); else cb.removeAttribute('checked');
+        save();
+    }
+
+    /* ================= ファイル選択・ツリー ================= */
+    function selectFile(folder, file) {
+        if (!db[folder] || db[folder][file] === undefined) return;
+        currentPath = { folder, file };
+        localStorage.setItem('last_path_v8', JSON.stringify(currentPath));
+        document.getElementById('current-display').textContent = file;
+        memo.innerHTML = getFileContent(folder, file);
+        updateCharCount();
+        applySettingsToEditor();
+        initHistoryForCurrentFile();
+        refreshMenuStates();
+        if (tabState.enabled) ensureTabOpen('main', folder, file);
+
+        const sb = document.getElementById('sidebar');
+        const ov = document.getElementById('overlay');
+        sb.classList.add('hidden');
+        ov.classList.remove('show');
+        ov.style.display = "none";
+
+        renderTree();
+        setTimeout(() => memo.focus(), 100);
+    }
+
+    function toggleSidebar() {
+        const sb = document.getElementById('sidebar');
+        const ov = document.getElementById('overlay');
+        const willHide = !sb.classList.contains('hidden');
+        sb.classList.toggle('hidden');
+        if (willHide) {
+            ov.classList.remove('show');
+            ov.style.display = "none";
+        } else {
+            ov.classList.add('show');
+            ov.style.display = "";
+        }
+    }
+
+    function renderTree() {
+        const container = document.getElementById('tree-container');
+        container.innerHTML = "";
+        for (const f in db) {
+            const folderWrap = document.createElement('div');
+            folderWrap.style.marginBottom = "15px";
+            folderWrap.innerHTML = `
+                <div oncontextmenu="event.preventDefault(); event.stopPropagation(); showFolderContextMenu(event, '${f}');" style="display:flex; justify-content:space-between; align-items:center; font-weight:bold; margin-bottom:5px;">
+                    <span>${f}</span>
+                    <div style="display:flex; gap:5px;">
+                        <button onclick="addFile('${f}')" style="padding:2px 8px;">＋</button>
+                        <button onclick="deleteFolder('${f}')" style="background:none; border:none; cursor:pointer;">✕</button>
+                    </div>
+                </div>
+            `;
+            let fileNames = Object.keys(db[f]);
+            const sortBy = appSettings.sortBy || 'name';
+            fileNames.sort((a, b) => {
+                const ma = getFileMeta(f, a) || {}, mb = getFileMeta(f, b) || {};
+                if (sortBy === 'updated') return (mb.updatedAt || 0) - (ma.updatedAt || 0);
+                if (sortBy === 'tags') {
+                    const ta = (ma.tags || []).join(',');
+                    const tb = (mb.tags || []).join(',');
+                    return ta.localeCompare(tb, 'ja') || a.localeCompare(b, 'ja');
+                }
+                return a.localeCompare(b, 'ja');
+            });
+            for (const file of fileNames) {
+                const meta = getFileMeta(f, file) || { tags: [] };
+                const isActive = (currentPath.file === file && currentPath.folder === f);
+                const p = document.createElement('div');
+                p.style.display = "flex";
+                p.style.justifyContent = "space-between";
+                p.style.alignItems = "center";
+                p.style.padding = "8px 10px";
+                p.style.margin = "2px 0";
+                p.style.borderRadius = "5px";
+                p.style.cursor = "pointer";
+                p.style.backgroundColor = isActive ? "#0078d4" : "rgba(0,0,0,0.05)";
+                p.style.color = isActive ? "white" : "inherit";
+                p.setAttribute('oncontextmenu', `event.preventDefault(); event.stopPropagation(); showFileContextMenu(event, '${f}', '${file}');`);
+                const tagsHtml = (meta.tags && meta.tags.length)
+                    ? `<div style="font-size:10px; opacity:0.75; margin-top:2px;">${meta.tags.map(t => '#' + t).join(' ')}</div>`
+                    : '';
+                p.innerHTML = `
+                    <div onclick="selectFile('${f}', '${file}')" style="flex-grow:1; min-width:0;">
+                        <div>${file}</div>
+                        ${tagsHtml}
+                    </div>
+                    <button onclick="deleteFile('${f}', '${file}')" style="background:none; border:none; color:inherit; cursor:pointer; opacity:0.6;">✕</button>
+                `;
+                folderWrap.appendChild(p);
+            }
+            container.appendChild(folderWrap);
+        }
+    }
+
+    function deleteFolder(folderName) {
+        if (confirm(`フォルダ「${folderName}」と中身をすべて削除しますか？`)) {
+            const removedFiles = db[folderName] ? Object.keys(db[folderName]) : [];
+            delete db[folderName];
+            if (currentPath.folder === folderName) resetEditor();
+            removedFiles.forEach(f => removeTabEverywhereAndReconcile(folderName, f));
+            save();
+            renderTree();
+        }
+    }
+
+    function deleteFile(folder, file) {
+        if (confirm(`ファイル「${file}」を削除しますか？`)) {
+            delete db[folder][file];
+            if (currentPath.folder === folder && currentPath.file === file) resetEditor();
+            removeTabEverywhereAndReconcile(folder, file);
+            save();
+            renderTree();
+        }
+    }
+
+    function resetEditor() {
+        currentPath = { folder: "", file: "" };
+        localStorage.removeItem('last_path_v8');
+        document.getElementById('current-display').textContent = "ファイル未選択";
+        memo.innerHTML = "";
+        updateCharCount();
+        applySettingsToEditor();
+        initHistoryForCurrentFile();
+        refreshMenuStates();
+    }
+
+    function addFolder() { const n = prompt("フォルダ名"); if (n) { db[n] = {}; renderTree(); save(); } }
+    function addFile(f) { const n = prompt("ファイル名"); if (n) { db[f][n] = makeFileEntry(""); save(); selectFile(f, n); } }
+    function exportAllData() { const blob = new Blob([JSON.stringify(db)], { type: 'application/json' }); const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = "backup.json"; a.click(); }
+
+    /* ================= 行番号（左ガター） ================= */
+    function countLogicalLines() {
+        const brCount = memo.querySelectorAll('br').length;
+        // Chrome系のcontenteditableは、末尾が空行のとき、キャレット表示のために
+        // 「予備の<br>」をもう1つ自動で追加する。そのため末尾の子要素がbrの場合は
+        // その最後のbrを行区切りとしてカウントしない（実際の改行はbrCount本のまま）。
+        let node = memo.lastChild;
+        while (node && node.nodeType === 3 && node.textContent.trim() === '') {
+            node = node.previousSibling;
+        }
+        const lastIsBr = !!node && node.nodeType === 1 && node.tagName === 'BR';
+        return lastIsBr ? Math.max(brCount, 1) : brCount + 1;
+    }
+    function updateLineNumbers() {
+        const gutter = document.getElementById('line-gutter');
+        const body = document.getElementById('editor-body');
+        if (!gutter) return;
+        const s = getCurrentFileSettings();
+        if (!s.lineNumbers || s.markdownMode) {
+            gutter.classList.add('hidden');
+            return;
+        }
+        gutter.classList.remove('hidden');
+        if (body) body.classList.toggle('print-active', !!s.printNotebook);
+
+        const cs = getComputedStyle(memo);
+        gutter.style.fontSize = cs.fontSize;
+        gutter.style.lineHeight = (cs.lineHeight && cs.lineHeight !== 'normal') ? cs.lineHeight : '1.6';
+        gutter.style.paddingTop = cs.paddingTop;
+        gutter.style.paddingBottom = cs.paddingBottom;
+
+        const count = countLogicalLines();
+        let html = '';
+        for (let i = 1; i <= count; i++) html += `<div>${i}</div>`;
+        gutter.innerHTML = html;
+        gutter.style.width = (24 + String(count).length * 8) + 'px';
+        gutter.scrollTop = memo.scrollTop;
+    }
+    function toggleLineNumbersMenu() {
+        if (!currentPath.file) { alert('ファイルを選択してください'); return; }
+        const s = getCurrentFileSettings();
+        s.lineNumbers = !s.lineNumbers;
+        persistCurrentFileSettings();
+        updateLineNumbers();
+        refreshMenuStates();
+    }
+
+    /* ================= 右クリックメニュー（共通） ================= */
+    function showContextMenu(x, y, itemsHtml) {
+        document.querySelectorAll('.dropdown').forEach(d => d.classList.remove('show'));
+        const menu = document.getElementById('custom-context-menu');
+        menu.innerHTML = itemsHtml;
+        menu.classList.add('show');
+        const dw = menu.offsetWidth, dh = menu.offsetHeight;
+        let left = x, top = y;
+        if (left + dw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - dw - 8);
+        if (top + dh > window.innerHeight - 8) top = Math.max(8, window.innerHeight - dh - 8);
+        menu.style.left = left + 'px';
+        menu.style.top = top + 'px';
+    }
+    function hideContextMenu() {
+        const menu = document.getElementById('custom-context-menu');
+        if (menu) menu.classList.remove('show');
+    }
+
+    function showFolderContextMenu(e, folder) {
+        const html = `
+            <button onclick="hideContextMenu(); renameFolder('${folder}')">名前を変更</button>
+            <button onclick="hideContextMenu(); deleteFolder('${folder}')">削除</button>
+            <button onclick="hideContextMenu(); copyFolder('${folder}')">コピー</button>
+            <button onclick="hideContextMenu(); duplicateFolder('${folder}')">複製</button>
+            <button onclick="hideContextMenu(); downloadFolderAsPDF('${folder}')">PDFでダウンロード</button>
+            <button onclick="hideContextMenu(); printFolder('${folder}')">印刷</button>
+        `;
+        showContextMenu(e.clientX, e.clientY, html);
+    }
+    function showFileContextMenu(e, folder, file) {
+        const html = `
+            <button onclick="hideContextMenu(); renameFile('${folder}','${file}')">名前を変更</button>
+            <button onclick="hideContextMenu(); deleteFile('${folder}','${file}')">削除</button>
+            <button onclick="hideContextMenu(); copyFileToClipboard('${folder}','${file}')">コピー</button>
+            <button onclick="hideContextMenu(); shareFile('${folder}','${file}')">共有</button>
+            <button onclick="hideContextMenu(); duplicateFile('${folder}','${file}')">複製</button>
+            <button onclick="hideContextMenu(); printFileByPath('${folder}','${file}')">印刷</button>
+            <button onclick="hideContextMenu(); downloadFileAsPNG('${folder}','${file}')">PNGでダウンロード</button>
+            <div class="dropdown-sep"></div>
+            <button onclick="hideContextMenu(); editFileTags('${folder}','${file}')">タグを編集</button>
+        `;
+        showContextMenu(e.clientX, e.clientY, html);
+    }
+    function renameFolder(oldName) {
+        if (!db[oldName]) return;
+        const newName = prompt('新しいフォルダ名を入力してください', oldName);
+        if (!newName || newName === oldName) return;
+        if (db[newName] !== undefined) { alert('同名のフォルダが既に存在します'); return; }
+        const ordered = {};
+        Object.keys(db).forEach(k => { ordered[k === oldName ? newName : k] = db[k]; });
+        db = ordered;
+        if (currentPath.folder === oldName) {
+            currentPath.folder = newName;
+            localStorage.setItem('last_path_v8', JSON.stringify(currentPath));
+        }
+        save();
+        renderTree();
+    }
+    function renameFile(folder, oldName) {
+        if (!db[folder] || db[folder][oldName] === undefined) return;
+        const newName = prompt('新しいファイル名を入力してください', oldName);
+        if (!newName || newName === oldName) return;
+        if (db[folder][newName] !== undefined) { alert('同名のファイルが既に存在します'); return; }
+        const ordered = {};
+        Object.keys(db[folder]).forEach(k => { ordered[k === oldName ? newName : k] = db[folder][k]; });
+        db[folder] = ordered;
+        if (currentPath.folder === folder && currentPath.file === oldName) {
+            currentPath.file = newName;
+            localStorage.setItem('last_path_v8', JSON.stringify(currentPath));
+            document.getElementById('current-display').textContent = newName;
+        }
+        save();
+        renderTree();
+    }
+    function editFileTags(folder, file) {
+        const meta = getFileMeta(folder, file);
+        if (!meta) return;
+        const current = (meta.tags || []).join(', ');
+        const input = prompt('タグをカンマ区切りで入力してください（例: 仕事, 重要）', current);
+        if (input === null) return;
+        meta.tags = input.split(',').map(s => s.trim()).filter(s => s);
+        save();
+        renderTree();
+    }
+    function setSortBy(mode) {
+        appSettings.sortBy = mode;
+        saveSettings();
+        renderTree();
+        refreshMenuStates();
+    }
+    function showSidebarContextMenu(e) {
+        const html = `
+            <button onclick="hideContextMenu(); pasteFileFromClipboard()">貼り付け</button>
+            <button onclick="hideContextMenu(); clearAllData()">すべてをクリア</button>
+        `;
+        showContextMenu(e.clientX, e.clientY, html);
+    }
+    function showEditorContextMenu(e) {
+        const html = `
+            <button onclick="hideContextMenu(); memo.focus(); document.execCommand('selectAll');">すべてを選択</button>
+            <button onclick="hideContextMenu(); doCopy();">コピー</button>
+            <button onclick="hideContextMenu(); doPaste();">貼り付け</button>
+            <button onclick="hideContextMenu(); doCut();">切り取り</button>
+            <button onclick="hideContextMenu(); doDelete();">削除</button>
+            <div class="dropdown-sep"></div>
+            <button onclick="hideContextMenu(); requestSplitEditor();">分割する</button>
+        `;
+        showContextMenu(e.clientX, e.clientY, html);
+    }
+
+    /* ================= フォルダ：コピー／複製／PDF ================= */
+    function copyFolder(folder) {
+        if (!db[folder]) return;
+        itemClipboard = { type: 'folder', name: folder, data: JSON.parse(JSON.stringify(db[folder])) };
+    }
+    function duplicateFolder(folder) {
+        if (!db[folder]) return;
+        let newName = folder + 'のコピー';
+        let i = 2;
+        while (db[newName] !== undefined) { newName = folder + 'のコピー' + i; i++; }
+        db[newName] = JSON.parse(JSON.stringify(db[folder]));
+        save(); renderTree();
+    }
+    /* ================= Median.co（旧GoNative）ラッパー対応 =================
+       MedianのWebViewはセキュリティ上、window.print()の別ウィンドウ表示や
+       navigator.shareが動かないことがあるため、Median公式のJavaScript Bridge
+       （median.share.sharePage / median.window.open）があればそちらを使う */
+    function getMedianBridge() {
+        if (window.median) return window.median;
+        if (window.gonative) return window.gonative;
+        return null;
+    }
+    function isMedianApp() { return !!getMedianBridge(); }
+    function medianOpenExternal(url) {
+        const bridge = getMedianBridge();
+        if (!bridge || !bridge.window || !bridge.window.open) return false;
+        try { bridge.window.open(url, 'external'); return true; } catch (e) { return false; }
+    }
+    function openHtmlForPrint(title, bodyHtml) {
+        if (isMedianApp()) {
+            /* MedianアプリのWebViewはwindow.print()のポップアップや、外部ブラウザへの
+               data: URLの受け渡し（"App is not installed"エラー）に対応していないため、
+               実際のPDFファイルを生成してダウンロードする方式にする。
+               ダウンロード後、端末のPDFビューアアプリから印刷できる。 */
+            generateAndDownloadPdf(title, bodyHtml);
+            return;
+        }
+        const fullHtml = `<html><head><title>${title}</title></head><body style="font-family:sans-serif; max-width:210mm; margin:auto; padding:20px;">${bodyHtml}<script>window.onload=function(){setTimeout(function(){window.print();},300);};<\/script></body></html>`;
+        const w = window.open('', '_blank');
+        if (!w) { alert('ポップアップがブロックされました。ポップアップを許可してください。'); return; }
+        w.document.write(fullHtml);
+        w.document.close();
+        setTimeout(() => { w.focus(); w.print(); }, 300);
+    }
+
+    /* jsPDF + html2canvas で実際のPDFファイルを生成し、通常のダウンロードとして保存する。
+       （Median環境でも、他のMarkdownエクスポート等と同じ仕組みのダウンロードなので確実に動く） */
+    async function generateAndDownloadPdf(title, bodyHtml) {
+        if (!window.jspdf || !window.jspdf.jsPDF || !window.html2canvas) {
+            alert('PDF生成ライブラリの読み込みに失敗しました。通信環境を確認して、もう一度お試しください。');
+            return;
+        }
+        const container = document.createElement('div');
+        container.style.cssText = 'position:fixed; left:-9999px; top:0; width:210mm; background:#fff; color:#000; padding:20px; box-sizing:border-box; font-family:sans-serif;';
+        container.innerHTML = bodyHtml;
+        document.body.appendChild(container);
+        try {
+            const { jsPDF } = window.jspdf;
+            const pdf = new jsPDF({ unit: 'mm', format: 'a4' });
+            await pdf.html(container, {
+                margin: [10, 10, 10, 10],
+                autoPaging: 'text',
+                width: 190,
+                windowWidth: container.scrollWidth || 794,
+                html2canvas: { scale: 2, useCORS: true }
+            });
+            const blob = pdf.output('blob');
+            const fileName = (title || 'メモ') + '.pdf';
+            /* Androidの共有シートには多くの端末で標準の「印刷」項目があるため、
+               PDFをファイルとして共有できればそこから直接印刷画面まで到達できる。
+               window.print()自体はWebViewでは存在しない（Chromeブラウザ専用の）機能なので、
+               こちらが本命のルート。使えない場合のみダウンロードにフォールバックする。 */
+            let sharedViaOS = false;
+            try {
+                const file = new File([blob], fileName, { type: 'application/pdf' });
+                if (navigator.canShare && navigator.canShare({ files: [file] })) {
+                    await navigator.share({ files: [file], title: fileName });
+                    sharedViaOS = true;
+                }
+            } catch (shareErr) {
+                /* ユーザーがシートをキャンセルした場合は何もしない（再ダウンロードしない） */
+                if (shareErr && shareErr.name === 'AbortError') { container.remove(); return; }
+            }
+            if (!sharedViaOS) {
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = fileName;
+                document.body.appendChild(a);
+                a.click();
+                a.remove();
+                alert('PDFをダウンロードしました。通知欄からダウンロードを開き、PDFビューアアプリの印刷アイコンから印刷してください。');
+            }
+        } catch (e) {
+            alert('PDFの生成に失敗しました: ' + (e && e.message ? e.message : e));
+        } finally {
+            container.remove();
+        }
+    }
+
+    function buildFolderPrintHtml(folder) {
+        let bodyHtml = `<h1 style="font-family:sans-serif;">${folder}</h1>`;
+        for (const file in db[folder]) {
+            bodyHtml += `<h2 style="font-family:sans-serif; border-bottom:1px solid #ccc; margin-top:32px;">${file}</h2>`;
+            bodyHtml += `<div style="font-family:sans-serif;">${getFileContent(folder, file)}</div>`;
+        }
+        return bodyHtml;
+    }
+    function openFolderInPrintWindow(folder) {
+        if (!db[folder]) return;
+        openHtmlForPrint(folder, buildFolderPrintHtml(folder));
+    }
+    function downloadFolderAsPDF(folder) { openFolderInPrintWindow(folder); }
+    /* フォルダ内のメモファイル分をまとめて印刷（印刷ダイアログで「PDFに保存」を選べばPDF化も可能） */
+    function printFolder(folder) { openFolderInPrintWindow(folder); }
+    function downloadCurrentFolderAsPDF() {
+        if (!currentPath.folder) { alert('フォルダが選択されていません。サイドバーでファイルを選んでください。'); return; }
+        downloadFolderAsPDF(currentPath.folder);
+    }
+    function printCurrentFolder() {
+        if (!currentPath.folder) { alert('フォルダが選択されていません。サイドバーでファイルを選んでください。'); return; }
+        printFolder(currentPath.folder);
+    }
+
+    /* ================= ファイル：コピー／複製／印刷／PNG ================= */
+    function copyFileToClipboard(folder, file) {
+        if (!db[folder] || db[folder][file] === undefined) return;
+        itemClipboard = { type: 'file', name: file, data: JSON.parse(JSON.stringify(getFileMeta(folder, file))) };
+        const tmp = document.createElement('div');
+        tmp.innerHTML = getFileContent(folder, file);
+        const text = tmp.innerText || '';
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).catch(() => {});
+        }
+    }
+    function shareCurrentFile() {
+        if (!currentPath.file) { alert('ファイルを選択してください'); return; }
+        shareFile(currentPath.folder, currentPath.file);
+    }
+    function shareFile(folder, file) {
+        if (!db[folder] || db[folder][file] === undefined) return;
+        const tmp = document.createElement('div');
+        tmp.innerHTML = getFileContent(folder, file);
+        const text = tmp.innerText || '';
+        const shareText = file + '\n\n' + text;
+        const bridge = getMedianBridge();
+        if (bridge && bridge.share && bridge.share.sharePage) {
+            try { bridge.share.sharePage({ text: shareText }); return; } catch (e) { /* 下のフォールバックへ */ }
+        }
+        if (navigator.share) {
+            navigator.share({ title: file, text: shareText }).catch(() => {});
+        } else if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(shareText)
+                .then(() => alert('この端末では共有機能が使えないため、ファイル名と内容をクリップボードにコピーしました'))
+                .catch(() => alert('共有に失敗しました'));
+        } else {
+            alert('この端末では共有機能を利用できません');
+        }
+    }
+    function duplicateFile(folder, file) {
+        if (!db[folder] || db[folder][file] === undefined) return;
+        let newName = file + 'のコピー';
+        let i = 2;
+        while (db[folder][newName] !== undefined) { newName = file + 'のコピー' + i; i++; }
+        db[folder][newName] = JSON.parse(JSON.stringify(getFileMeta(folder, file)));
+        db[folder][newName].updatedAt = Date.now();
+        save(); renderTree();
+    }
+    function printFileByPath(folder, file) {
+        if (!db[folder] || db[folder][file] === undefined) return;
+        openHtmlForPrint(file, getFileContent(folder, file));
+    }
+    function exportHtmlAsPNG(htmlContent, filename) {
+        const probe = document.createElement('div');
+        probe.style.cssText = 'position:absolute; left:-9999px; top:0; width:600px; font-family:sans-serif; font-size:18px; padding:20px; box-sizing:border-box;';
+        probe.innerHTML = htmlContent;
+        document.body.appendChild(probe);
+        const w = Math.max(probe.scrollWidth, 400);
+        const h = Math.max(probe.scrollHeight, 300);
+        document.body.removeChild(probe);
+        const data = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">
+            <foreignObject width="100%" height="100%">
+                <div xmlns="http://www.w3.org/1999/xhtml" style="font-family:sans-serif; font-size:18px; padding:20px; background:white; color:black; width:${w}px; box-sizing:border-box;">${htmlContent}</div>
+            </foreignObject>
+        </svg>`;
+        const svgBlob = new Blob([data], { type: 'image/svg+xml;charset=utf-8' });
+        const url = URL.createObjectURL(svgBlob);
+        const img = new Image();
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            canvas.width = w; canvas.height = h;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+            ctx.drawImage(img, 0, 0);
+            URL.revokeObjectURL(url);
+            canvas.toBlob(blob => {
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = filename + '.png';
+                a.click();
+            });
+        };
+        img.onerror = () => alert('画像化に失敗しました。内容によっては非対応の場合があります。');
+        img.src = url;
+    }
+    function downloadFileAsPNG(folder, file) {
+        if (!db[folder] || db[folder][file] === undefined) return;
+        exportHtmlAsPNG(getFileContent(folder, file), file);
+    }
+
+    /* ================= 空欄の右クリック：貼り付け／すべてをクリア ================= */
+    function pasteFileFromClipboard() {
+        if (!itemClipboard) { alert('クリップボードが空です'); return; }
+        if (itemClipboard.type === 'folder') {
+            let newName = itemClipboard.name;
+            let i = 2;
+            while (db[newName] !== undefined) { newName = itemClipboard.name + i; i++; }
+            db[newName] = JSON.parse(JSON.stringify(itemClipboard.data));
+            save(); renderTree();
+        } else if (itemClipboard.type === 'file') {
+            let targetFolder = currentPath.folder && db[currentPath.folder] ? currentPath.folder : null;
+            if (!targetFolder) {
+                const names = Object.keys(db);
+                targetFolder = names.length ? names[0] : null;
+            }
+            if (!targetFolder) {
+                targetFolder = 'メモ';
+                db[targetFolder] = {};
+            }
+            let newName = itemClipboard.name;
+            let i = 2;
+            while (db[targetFolder][newName] !== undefined) { newName = itemClipboard.name + i; i++; }
+            db[targetFolder][newName] = JSON.parse(JSON.stringify(itemClipboard.data));
+            db[targetFolder][newName].updatedAt = Date.now();
+            save(); renderTree();
+        }
+    }
+    function clearAllData() {
+        if (confirm('すべてのフォルダとメモを削除します。よろしいですか？')) {
+            db = {};
+            resetEditor();
+            save();
+            renderTree();
+        }
+    }
+
+    /* ================= メニューバー（開閉・状態表示） ================= */
+    function toggleMenu(id, btnEl) {
+        const target = document.getElementById(id);
+        const isOpen = target.classList.contains('show');
+        document.querySelectorAll('.dropdown').forEach(d => d.classList.remove('show'));
+        if (isOpen) return;
+
+        target.classList.add('show');
+        refreshMenuStates();
+
+        const rect = btnEl.getBoundingClientRect();
+        const dw = target.offsetWidth;
+        const dh = target.offsetHeight;
+        let left = rect.left;
+        let top = rect.bottom;
+        if (left + dw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - dw - 8);
+        if (top + dh > window.innerHeight - 8) top = Math.max(8, rect.top - dh);
+        target.style.left = left + 'px';
+        target.style.top = top + 'px';
+    }
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('.menu-bar')) {
+            document.querySelectorAll('.dropdown').forEach(d => d.classList.remove('show'));
+        }
+    });
+    function refreshMenuStates() {
+        const s = getCurrentFileSettings();
+        document.getElementById('menu-statusbar-toggle').textContent = (appSettings.statusBarVisible !== false ? '✓ ' : '　 ') + 'ステータスバーの表示';
+        document.getElementById('menu-darkmode-toggle').textContent = (appSettings.darkMode ? '✓ ' : '　 ') + 'ダークモード';
+        document.getElementById('menu-tabmode-toggle').textContent = (tabState.enabled ? '✓ ' : '　 ') + 'タブモードの表示';
+        document.getElementById('menu-ruler-toggle').textContent = (s.rulerEnabled ? '✓ ' : '　 ') + 'ルーラーの表示';
+        document.getElementById('menu-printmode-toggle').textContent = (s.printNotebook ? '✓ ' : '　 ') + '印刷メモ帳を有効にする';
+        document.getElementById('menu-bullet-toggle').textContent = (s.bulletOnEnter ? '✓ ' : '　 ') + 'Enterキーで「・」を自動追加';
+        document.getElementById('menu-linenum-toggle').textContent = (s.lineNumbers ? '✓ ' : '　 ') + '左に行番号を表示';
+        document.getElementById('menu-markdown-toggle').textContent = (s.markdownMode ? '✓ ' : '　 ') + 'Markdownモード';
+        document.getElementById('menu-monaco-toggle').textContent = (s.monacoMode ? '✓ ' : '　 ') + 'Monacoエディターモード';
+        document.getElementById('menu-todo-toggle').textContent = (s.todoListDisplay ? '✓ ' : '　 ') + 'ToDoリスト表示';
+    }
+
+    /* ================= 表示メニュー機能（設定は開いているノートごとに保存） ================= */
+    function applySettingsToEditor() {
+        const s = getCurrentFileSettings();
+        memo.style.fontFamily = s.font;
+        if (s.fontSize) memo.style.fontSize = s.fontSize + 'px';
+        memo.setAttribute('inputmode', s.keyboard);
+        document.getElementById('ruler-bar').classList.toggle('show', s.rulerEnabled);
+        document.getElementById('editor-area').classList.toggle('print-mode', s.printNotebook);
+        document.getElementById('footer').style.display = (appSettings.statusBarVisible === false) ? 'none' : 'flex';
+        const sizeSlider = document.getElementById('global-size-slider');
+        if (sizeSlider && s.fontSize) sizeSlider.value = s.fontSize;
+        applyMarkdownModeUI();
+        applyMonacoModeUI();
+        updateLineNumbers();
+    }
+    function setFont(font) {
+        if (!currentPath.file) return;
+        const s = getCurrentFileSettings();
+        s.font = font; persistCurrentFileSettings(); applySettingsToEditor();
+    }
+    function setKeyboard(kb) {
+        if (!currentPath.file) return;
+        const s = getCurrentFileSettings();
+        s.keyboard = kb; persistCurrentFileSettings(); applySettingsToEditor();
+    }
+    function toggleBulletMenu() {
+        if (!currentPath.file) return;
+        const s = getCurrentFileSettings();
+        s.bulletOnEnter = !s.bulletOnEnter; persistCurrentFileSettings(); refreshMenuStates();
+    }
+    function toggleRulerMenu() {
+        if (!currentPath.file) { alert('ファイルを選択してください'); return; }
+        const s = getCurrentFileSettings();
+        s.rulerEnabled = !s.rulerEnabled; persistCurrentFileSettings(); applySettingsToEditor(); refreshMenuStates();
+    }
+    function togglePrintModeMenu() {
+        if (!currentPath.file) { alert('ファイルを選択してください'); return; }
+        const s = getCurrentFileSettings();
+        s.printNotebook = !s.printNotebook; persistCurrentFileSettings(); applySettingsToEditor(); refreshMenuStates();
+    }
+    function toggleStatusBarMenu() { appSettings.statusBarVisible = (appSettings.statusBarVisible === false) ? true : false; saveSettings(); applySettingsToEditor(); refreshMenuStates(); }
+    /* ダークモードは上の青いツールバー(.toolbar)には影響しない。
+       .toolbarは常に固定の#0078d4を使っており、CSS変数(--bg-color等)を参照していないため。 */
+    function toggleDarkModeMenu() {
+        appSettings.darkMode = !appSettings.darkMode;
+        saveSettings();
+        document.body.classList.toggle('dark-mode', appSettings.darkMode);
+        if (window.monaco && monacoEditorInstance) {
+            monacoEditorInstance.updateOptions({ theme: appSettings.darkMode ? 'vs-dark' : 'vs' });
+        }
+        refreshMenuStates();
+    }
+    function toggleMarkdownMode() {
+        if (!currentPath.file) { alert('ファイルを選択してください'); return; }
+        const s = getCurrentFileSettings();
+        if (!s.markdownMode) {
+            if (s.monacoMode) { s.monacoMode = false; }
+            s.markdownSource = htmlToMarkdown(memo.innerHTML);
+            s.markdownMode = true;
+        } else {
+            const html = markdownToHtml(s.markdownSource || '');
+            memo.innerHTML = html;
+            setFileContent(currentPath.folder, currentPath.file, html);
+            s.markdownMode = false;
+        }
+        persistCurrentFileSettings();
+        applySettingsToEditor();
+        updateCharCount();
+        refreshMenuStates();
+    }
+    function toggleTodoListDisplay() {
+        if (!currentPath.file) { alert('ファイルを選択してください'); return; }
+        const s = getCurrentFileSettings();
+        s.todoListDisplay = !s.todoListDisplay;
+        persistCurrentFileSettings();
+        if (s.markdownMode) renderMarkdownPreview();
+        refreshMenuStates();
+    }
+
+    function zoomIn() { zoomLevel = Math.min(300, zoomLevel + 10); memo.style.zoom = zoomLevel + '%'; }
+    function zoomOut() { zoomLevel = Math.max(30, zoomLevel - 10); memo.style.zoom = zoomLevel + '%'; }
+    function zoomReset() { zoomLevel = 100; memo.style.zoom = '100%'; }
+
+    function renderRuler() {
+        const bar = document.getElementById('ruler-bar');
+        bar.innerHTML = '';
+        const unitPx = 50;
+        const totalUnits = 60;
+        for (let i = 0; i <= totalUnits; i++) {
+            const tick = document.createElement('div');
+            tick.className = 'ruler-tick';
+            tick.style.width = unitPx + 'px';
+            tick.textContent = i;
+            bar.appendChild(tick);
+        }
+    }
+
+    /* ================= ファイルメニュー機能 ================= */
+    function saveAsText() {
+        if (!currentPath.file) return alert('ファイルを選択してください');
+        const blob = new Blob([memo.innerText], { type: 'text/plain' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = currentPath.file + '.txt';
+        a.click();
+    }
+
+    function saveAsPNG() {
+        if (!currentPath.file) return alert('ファイルを選択してください');
+        exportHtmlAsPNG(memo.innerHTML, currentPath.file);
+    }
+
+    function printFile() {
+        if (isMedianApp() && currentPath.file) { printFileByPath(currentPath.folder, currentPath.file); return; }
+        window.print();
+    }
+    function quickPrint() {
+        if (isMedianApp() && currentPath.file) { printFileByPath(currentPath.folder, currentPath.file); return; }
+        window.print();
+    }
+
+    function showPreview() {
+        const w = window.open('', '_blank');
+        if (!w) { alert('ポップアップがブロックされました'); return; }
+        w.document.write(`<html><head><title>プレビュー - ${currentPath.file || ''}</title></head><body style="font-family:sans-serif; padding:40px; max-width:210mm; margin:auto;">${memo.innerHTML}</body></html>`);
+        w.document.close();
+    }
+
+    function openJSON() { document.getElementById('json-file-input').click(); }
+    function handleJsonOpen(e) {
+        const file = e.target.files[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = ev => {
+            try {
+                const imported = JSON.parse(ev.target.result);
+                Object.assign(db, imported);
+                migrateDb();
+                save(); renderTree();
+                alert('JSONを読み込みました');
+            } catch (err) { alert('JSONの読み込みに失敗しました'); }
+        };
+        reader.readAsText(file);
+        e.target.value = '';
+    }
+
+    function sendEmailCurrent() {
+        if (!currentPath.file) return alert('ファイルを選択してください');
+        const subject = encodeURIComponent(currentPath.file);
+        const body = encodeURIComponent(memo.innerText);
+        window.location.href = `mailto:?subject=${subject}&body=${body}`;
+    }
+
+    /* ================= Markdown対応（見出し・リスト・エクスポート/インポート） ================= */
+    function applyHeading(level) {
+        if (!currentPath.file) return;
+        memo.focus();
+        document.execCommand('formatBlock', false, 'H' + level);
+        save(); updateCharCount(); updateLineNumbers();
+    }
+    function applyBulletList() {
+        if (!currentPath.file) return;
+        memo.focus();
+        document.execCommand('insertUnorderedList');
+        save(); updateCharCount(); updateLineNumbers();
+    }
+    function applyNumberedList() {
+        if (!currentPath.file) return;
+        memo.focus();
+        document.execCommand('insertOrderedList');
+        save(); updateCharCount(); updateLineNumbers();
+    }
+    function htmlToMarkdown(html) {
+        if (window.TurndownService) {
+            try {
+                const td = new TurndownService({ headingStyle: 'atx', bulletListMarker: '-', codeBlockStyle: 'fenced' });
+                if (td.use && window.turndownPluginGfm) td.use(window.turndownPluginGfm.gfm);
+                td.addRule('todoCheckbox', {
+                    filter: node => node.nodeName === 'INPUT' && node.getAttribute('type') === 'checkbox',
+                    replacement: (content, node) => (node.checked ? '[x] ' : '[ ] ')
+                });
+                return td.turndown(html || '');
+            } catch (e) { /* 下のフォールバックへ */ }
+        }
+        /* Turndownが読み込めなかった場合の簡易フォールバック */
+        const div = document.createElement('div');
+        div.innerHTML = html || '';
+        function walk(node) {
+            let out = '';
+            node.childNodes.forEach(child => {
+                if (child.nodeType === 3) { out += child.textContent; return; }
+                if (child.nodeType !== 1) return;
+                const tag = child.tagName;
+                if (tag === 'BR') { out += '\n'; return; }
+                if (tag === 'UL') {
+                    child.querySelectorAll(':scope > li').forEach(li => { out += `- ${li.textContent}\n`; });
+                    return;
+                }
+                if (tag === 'OL') {
+                    let i = 1;
+                    child.querySelectorAll(':scope > li').forEach(li => { out += `${i++}. ${li.textContent}\n`; });
+                    return;
+                }
+                const inner = walk(child);
+                if (tag === 'B' || tag === 'STRONG') out += `**${inner}**`;
+                else if (tag === 'I' || tag === 'EM') out += `_${inner}_`;
+                else if (/^H[1-3]$/.test(tag)) out += `\n${'#'.repeat(Number(tag[1]))} ${inner}\n`;
+                else if (tag === 'DIV' || tag === 'P') out += inner + '\n';
+                else out += inner;
+            });
+            return out;
+        }
+        return walk(div).trim();
+    }
+    /* marked.js（GFM対応）でMarkdown→HTMLを本格的にレンダリングする。
+       見出し・強調・リンク・表・引用・コードブロック・番号/箇条書き・タスクリストなど、
+       自前実装より仕様に忠実に変換される。 */
+    function markdownToHtml(md, opts) {
+        opts = opts || {};
+        if (window.marked) {
+            try {
+                let html = marked.parse(md || '', { gfm: true, breaks: true });
+                const tmp = document.createElement('div');
+                tmp.innerHTML = html;
+                /* GFMのタスクリスト（- [ ] / - [x]）で生成されたチェックボックスに
+                   連番のdata-todo-indexを振る。ToDoリスト表示がOFFのときは
+                   通常のMarkdown表示と同様に無効化（クリック不可）のままにする */
+                tmp.querySelectorAll('li > input[type="checkbox"]').forEach((cb, idx) => {
+                    cb.setAttribute('data-todo-index', idx);
+                    cb.disabled = !opts.todo;
+                });
+                return tmp.innerHTML;
+            } catch (e) { /* 下のフォールバックへ */ }
+        }
+        /* marked.jsが読み込めなかった場合の簡易フォールバック（旧実装） */
+        const lines = (md || '').split(/\r?\n/);
+        let html = '';
+        lines.forEach((line) => {
+            let l = line.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/_(.+?)_/g, '<i>$1</i>');
+            if (/^### /.test(l)) html += `<h3>${l.slice(4)}</h3>`;
+            else if (/^## /.test(l)) html += `<h2>${l.slice(3)}</h2>`;
+            else if (/^# /.test(l)) html += `<h1>${l.slice(2)}</h1>`;
+            else if (/^[-*] /.test(l)) html += `・${l.slice(2)}<br>`;
+            else html += (l === '' ? '<br>' : l + '<br>');
+        });
+        return html;
+    }
+    function exportAsMarkdown() {
+        if (!currentPath.file) return alert('ファイルを選択してください');
+        const s = getCurrentFileSettings();
+        const md = s.markdownMode ? (s.markdownSource || '') : htmlToMarkdown(memo.innerHTML);
+        const blob = new Blob([md], { type: 'text/markdown' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = currentPath.file + '.md';
+        a.click();
+    }
+    function triggerImportMarkdown() { document.getElementById('md-file-input').click(); }
+    function handleMarkdownImport(e) {
+        const file = e.target.files[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = ev => {
+            const mdText = ev.target.result;
+            const html = markdownToHtml(mdText);
+            let folder = currentPath.folder && db[currentPath.folder] ? currentPath.folder : Object.keys(db)[0];
+            if (!folder) { folder = 'メモ'; db[folder] = {}; }
+            let name = file.name.replace(/\.(md|markdown)$/i, '');
+            let uniqueName = name, i = 2;
+            while (db[folder][uniqueName] !== undefined) { uniqueName = name + i; i++; }
+            const entry = makeFileEntry(html);
+            entry.settings.markdownMode = true;
+            entry.settings.markdownSource = mdText;
+            db[folder][uniqueName] = entry;
+            save(); renderTree(); selectFile(folder, uniqueName);
+        };
+        reader.readAsText(file);
+        e.target.value = '';
+    }
+
+    /* ================= Markdownモード：分割表示（PC=左右／スマホ=上下） ================= */
+    function applyMarkdownModeUI() {
+        const s = getCurrentFileSettings();
+        const isMd = !!(currentPath.file && s.markdownMode);
+        const mdSplit = document.getElementById('md-split');
+        mdSplit.classList.toggle('show', isMd);
+        memo.style.display = isMd ? 'none' : '';
+        if (isMd) {
+            document.getElementById('markdown-source').value = s.markdownSource || '';
+            renderMarkdownPreview();
+        }
+    }
+    function onMarkdownSourceInput() {
+        if (!currentPath.file) return;
+        const s = getCurrentFileSettings();
+        s.markdownSource = document.getElementById('markdown-source').value;
+        const html = markdownToHtml(s.markdownSource, { todo: s.todoListDisplay });
+        setFileContent(currentPath.folder, currentPath.file, html);
+        save();
+        renderMarkdownPreview();
+        updateCharCount();
+    }
+
+    /* ================= Monacoエディターモード =================
+       「追加」（＝Monacoエディターモードを有効化するボタン＝表示メニューの「Monacoエディターモード」）を押すと
+       言語の拡張子をprompt()で尋ね、それをMonacoの言語IDに変換してハイライトに反映する。
+       中身はコードとしてプレーンテキストで保持し、通常のリッチテキスト(#memo)とは別に
+       ファイルのsettings.monacoSourceに保存する。 */
+    const EXT_TO_MONACO_LANG = {
+        js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript',
+        ts: 'typescript', tsx: 'typescript',
+        py: 'python', rb: 'ruby', php: 'php', java: 'java',
+        c: 'c', h: 'c', cpp: 'cpp', cc: 'cpp', hpp: 'cpp', cxx: 'cpp',
+        cs: 'csharp', go: 'go', rs: 'rust', swift: 'swift', kt: 'kotlin',
+        sh: 'shell', bash: 'shell', zsh: 'shell',
+        html: 'html', htm: 'html', vue: 'html',
+        css: 'css', scss: 'scss', less: 'less',
+        json: 'json', xml: 'xml', yml: 'yaml', yaml: 'yaml',
+        md: 'markdown', sql: 'sql', txt: 'plaintext', dart: 'dart',
+        lua: 'lua', r: 'r', pl: 'perl', ps1: 'powershell', dockerfile: 'dockerfile'
+    };
+    function extToMonacoLang(ext) {
+        const key = (ext || '').replace(/^\./, '').trim().toLowerCase();
+        if (!key) return 'plaintext';
+        return EXT_TO_MONACO_LANG[key] || key;
+    }
+    let monacoEditorInstance = null;
+    let monacoLoadPromise = null;
+    function ensureMonacoLoaded() {
+        if (window.monaco) return Promise.resolve();
+        if (monacoLoadPromise) return monacoLoadPromise;
+        monacoLoadPromise = new Promise((resolve, reject) => {
+            if (!window.require || !window.require.config) { reject(new Error('Monacoローダーが読み込まれていません')); return; }
+            require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.47.0/min/vs' } });
+            require(['vs/editor/editor.main'], () => resolve(), (err) => reject(err));
+        });
+        return monacoLoadPromise;
+    }
+    function toggleMonacoMode() {
+        if (!currentPath.file) { alert('ファイルを選択してください'); return; }
+        const s = getCurrentFileSettings();
+        if (!s.monacoMode) {
+            const ext = prompt('言語の拡張子を入力してください（例: js, py, html）', s.monacoExt || '');
+            if (ext === null) return; /* キャンセル */
+            if (s.markdownMode) { s.markdownMode = false; }
+            s.monacoExt = ext;
+            s.monacoLang = extToMonacoLang(ext);
+            if (!s.monacoSource) {
+                const tmp = document.createElement('div');
+                tmp.innerHTML = getFileContent(currentPath.folder, currentPath.file);
+                s.monacoSource = tmp.innerText || '';
+            }
+            s.monacoMode = true;
+        } else {
+            s.monacoMode = false;
+        }
+        persistCurrentFileSettings();
+        applyMonacoModeUI();
+        refreshMenuStates();
+    }
+    async function applyMonacoModeUI() {
+        const s = getCurrentFileSettings();
+        const container = document.getElementById('monaco-container');
+        const isMonaco = !!(currentPath.file && s.monacoMode);
+        if (!isMonaco) {
+            if (container) container.classList.remove('show');
+            return;
+        }
+        memo.style.display = 'none';
+        document.getElementById('md-split').classList.remove('show');
+        container.classList.add('show');
+        try {
+            await ensureMonacoLoaded();
+        } catch (e) {
+            alert('Monacoエディターの読み込みに失敗しました。通信環境を確認してください。');
+            s.monacoMode = false;
+            persistCurrentFileSettings();
+            container.classList.remove('show');
+            memo.style.display = '';
+            refreshMenuStates();
+            return;
+        }
+        /* 選択中のファイルが変わっている可能性があるため、最新の設定を取り直す */
+        const cur = getCurrentFileSettings();
+        if (!monacoEditorInstance) {
+            monacoEditorInstance = monaco.editor.create(container, {
+                value: cur.monacoSource || '',
+                language: cur.monacoLang || 'plaintext',
+                automaticLayout: true,
+                theme: appSettings.darkMode ? 'vs-dark' : 'vs'
+            });
+            monacoEditorInstance.onDidChangeModelContent(() => {
+                if (!currentPath.file) return;
+                const cs = getCurrentFileSettings();
+                if (!cs.monacoMode) return;
+                cs.monacoSource = monacoEditorInstance.getValue();
+                persistCurrentFileSettings();
+                const escaped = cs.monacoSource
+                    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                setFileContent(currentPath.folder, currentPath.file, `<pre>${escaped}</pre>`);
+                save();
+                updateCharCount();
+            });
+        } else {
+            monacoEditorInstance.setValue(cur.monacoSource || '');
+            const model = monacoEditorInstance.getModel();
+            if (model) monaco.editor.setModelLanguage(model, cur.monacoLang || 'plaintext');
+            monacoEditorInstance.updateOptions({ theme: appSettings.darkMode ? 'vs-dark' : 'vs' });
+        }
+    }
+
+    function renderMarkdownPreview() {
+        const s = getCurrentFileSettings();
+        const previewEl = document.getElementById('markdown-preview');
+        previewEl.innerHTML = markdownToHtml(s.markdownSource || '', { todo: s.todoListDisplay });
+        if (s.todoListDisplay) {
+            previewEl.querySelectorAll('input[type="checkbox"][data-todo-index]').forEach(cb => {
+                cb.addEventListener('change', onTodoCheckboxToggle);
+            });
+        }
+    }
+    function onTodoCheckboxToggle(e) {
+        if (!currentPath.file) return;
+        const s = getCurrentFileSettings();
+        const targetIdx = Number(e.target.getAttribute('data-todo-index'));
+        const lines = (s.markdownSource || '').split(/\r?\n/);
+        const taskLineRe = /^(\s*(?:[-*+]|\d+[.)])\s\[)([ xX])(\])/;
+        let count = -1;
+        for (let i = 0; i < lines.length; i++) {
+            if (taskLineRe.test(lines[i])) {
+                count++;
+                if (count === targetIdx) {
+                    const checked = e.target.checked;
+                    lines[i] = lines[i].replace(taskLineRe, (m, p1, p2, p3) => p1 + (checked ? 'x' : ' ') + p3);
+                    break;
+                }
+            }
+        }
+        s.markdownSource = lines.join('\n');
+        document.getElementById('markdown-source').value = s.markdownSource;
+        const html = markdownToHtml(s.markdownSource, { todo: s.todoListDisplay });
+        setFileContent(currentPath.folder, currentPath.file, html);
+        save();
+        renderMarkdownPreview();
+    }
+
+    /* ================= 検索・置換 ================= */
+    let searchMatches = [];
+    let searchIndex = -1;
+
+    function openSearchPanel() {
+        document.getElementById('search-panel').classList.add('show');
+        document.getElementById('search-input').focus();
+        runSearch();
+    }
+    function closeSearchPanel() {
+        document.getElementById('search-panel').classList.remove('show');
+    }
+    function findMatchesInMemo(query) {
+        if (!query) return [];
+        const matches = [];
+        const q = query.toLowerCase();
+        const walker = document.createTreeWalker(memo, NodeFilter.SHOW_TEXT, null);
+        let node;
+        while (node = walker.nextNode()) {
+            const text = node.textContent.toLowerCase();
+            let idx = 0;
+            while ((idx = text.indexOf(q, idx)) !== -1) {
+                matches.push({ node, start: idx, end: idx + query.length });
+                idx += query.length;
+            }
+        }
+        return matches;
+    }
+    function runSearch() {
+        const q = document.getElementById('search-input').value;
+        searchMatches = findMatchesInMemo(q);
+        searchIndex = searchMatches.length ? 0 : -1;
+        if (searchIndex >= 0) selectMatch(searchIndex);
+        updateSearchStatus();
+    }
+    function selectMatch(i) {
+        const m = searchMatches[i];
+        if (!m) return;
+        try {
+            const range = document.createRange();
+            range.setStart(m.node, m.start);
+            range.setEnd(m.node, m.end);
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+            const el = m.node.parentElement;
+            if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' });
+        } catch (err) { /* DOMが変化して無効になったRangeは無視 */ }
+    }
+    function searchNext() {
+        if (!searchMatches.length) { runSearch(); return; }
+        searchIndex = (searchIndex + 1) % searchMatches.length;
+        selectMatch(searchIndex);
+        updateSearchStatus();
+    }
+    function searchPrev() {
+        if (!searchMatches.length) { runSearch(); return; }
+        searchIndex = (searchIndex - 1 + searchMatches.length) % searchMatches.length;
+        selectMatch(searchIndex);
+        updateSearchStatus();
+    }
+    function updateSearchStatus() {
+        const el = document.getElementById('search-status');
+        if (!el) return;
+        el.textContent = searchMatches.length ? `${searchIndex + 1} / ${searchMatches.length} 件` : '見つかりません';
+    }
+    function replaceCurrentMatch() {
+        if (!currentPath.file) return;
+        if (searchIndex < 0 || !searchMatches[searchIndex]) return;
+        const replaceText = document.getElementById('replace-input').value;
+        const m = searchMatches[searchIndex];
+        const range = document.createRange();
+        range.setStart(m.node, m.start);
+        range.setEnd(m.node, m.end);
+        range.deleteContents();
+        range.insertNode(document.createTextNode(replaceText));
+        memo.normalize();
+        save(); updateCharCount(); updateLineNumbers();
+        runSearch();
+    }
+    function replaceAllMatches() {
+        if (!currentPath.file) return;
+        const q = document.getElementById('search-input').value;
+        const replaceText = document.getElementById('replace-input').value;
+        if (!q) return;
+        const matches = findMatchesInMemo(q);
+        for (let i = matches.length - 1; i >= 0; i--) {
+            const m = matches[i];
+            const range = document.createRange();
+            range.setStart(m.node, m.start);
+            range.setEnd(m.node, m.end);
+            range.deleteContents();
+            range.insertNode(document.createTextNode(replaceText));
+        }
+        memo.normalize();
+        save(); updateCharCount(); updateLineNumbers();
+        runSearch();
+    }
+    function runGlobalSearch() {
+        const q = document.getElementById('search-input').value.trim();
+        const resultsEl = document.getElementById('global-search-results');
+        if (!q) { resultsEl.innerHTML = '<div style="font-size:12px; color:#888;">検索語を入力してください</div>'; return; }
+        const results = [];
+        for (const folder in db) {
+            for (const file in db[folder]) {
+                const tmp = document.createElement('div');
+                tmp.innerHTML = getFileContent(folder, file);
+                const text = tmp.innerText || '';
+                if (text.toLowerCase().includes(q.toLowerCase())) {
+                    const idx = text.toLowerCase().indexOf(q.toLowerCase());
+                    const snippet = text.slice(Math.max(0, idx - 10), idx + q.length + 20);
+                    results.push({ folder, file, snippet });
+                }
+            }
+        }
+        if (!results.length) {
+            resultsEl.innerHTML = '<div style="font-size:12px; color:#888;">見つかりませんでした</div>';
+            return;
+        }
+        resultsEl.innerHTML = results.map(r =>
+            `<div class="search-hit-row" onclick="jumpToSearchResult('${r.folder}','${r.file}')">
+                <span>${r.file}<br><span style="opacity:0.6;">…${r.snippet}…</span></span>
+            </div>`
+        ).join('');
+    }
+    function jumpToSearchResult(folder, file) {
+        selectFile(folder, file);
+        setTimeout(() => runSearch(), 150);
+    }
+
+    /* ================= バージョン履歴 ================= */
+    function openVersionHistory() {
+        if (!currentPath.file) { alert('ファイルを選択してください'); return; }
+        const meta = getFileMeta(currentPath.folder, currentPath.file);
+        const list = document.getElementById('version-list');
+        if (!meta || !meta.history || meta.history.length === 0) {
+            list.innerHTML = '<div>まだ履歴がありません（編集を続けると自動的に記録されます）</div>';
+        } else {
+            list.innerHTML = meta.history.slice().reverse().map((v, idx) => {
+                const realIdx = meta.history.length - 1 - idx;
+                const d = new Date(v.ts);
+                const label = `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+                const tmp = document.createElement('div'); tmp.innerHTML = v.content || '';
+                const chars = (tmp.innerText || '').replace(/[\n\r]/g, '').length;
+                return `<div class="version-row">
+                    <span>${label}（${chars}文字）</span>
+                    <button onclick="restoreVersion(${realIdx})">復元</button>
+                </div>`;
+            }).join('');
+        }
+        document.getElementById('version-panel').classList.add('show');
+    }
+    function closeVersionHistory() {
+        document.getElementById('version-panel').classList.remove('show');
+    }
+    function restoreVersion(idx) {
+        const meta = getFileMeta(currentPath.folder, currentPath.file);
+        if (!meta || !meta.history || !meta.history[idx]) return;
+        if (!confirm('このバージョンに復元しますか？（復元後も「戻る」ボタンでやり直せます）')) return;
+        commitHistory();
+        applyHistorySnapshot(meta.history[idx].content);
+        closeVersionHistory();
+    }
+
+    /* ================= 挿入メニュー機能 ================= */
+    function triggerInsertImage() { document.getElementById('image-insert-input').click(); }
+    function handleImageInsert(e) {
+        const file = e.target.files[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = ev => {
+            const probe = new Image();
+            probe.onload = () => {
+                const maxW = 320;
+                const scale = probe.width > maxW ? maxW / probe.width : 1;
+                const w = Math.round(probe.width * scale) || 160;
+                const h = Math.round(probe.height * scale) || 120;
+                const html = `<span class="resizable-box" draggable="true" contenteditable="false" style="width:${w}px;height:${h}px;"><img src="${ev.target.result}"></span>&nbsp;`;
+                memo.focus();
+                document.execCommand('insertHTML', false, html);
+                save(); updateCharCount();
+            };
+            probe.src = ev.target.result;
+        };
+        reader.readAsDataURL(file);
+        e.target.value = '';
+    }
+
+    function insertShapeSVG(type) {
+        const color = document.getElementById('shape-color-input').value || '#4da3ff';
+        let vb, w, h, inner;
+        if (type === 'rect') { vb = '0 0 120 80'; w = 120; h = 80; inner = `<rect x="2" y="2" width="116" height="76" fill="${color}" stroke="#333" stroke-width="2"/>`; }
+        else if (type === 'circle') { vb = '0 0 100 100'; w = 100; h = 100; inner = `<circle cx="50" cy="50" r="47" fill="${color}" stroke="#333" stroke-width="2"/>`; }
+        else if (type === 'triangle') { vb = '0 0 100 90'; w = 100; h = 90; inner = `<polygon points="50,4 96,86 4,86" fill="${color}" stroke="#333" stroke-width="2"/>`; }
+        else if (type === 'line') { vb = '0 0 120 24'; w = 120; h = 24; inner = `<line x1="4" y1="12" x2="116" y2="12" stroke="${color}" stroke-width="4" stroke-linecap="round"/>`; }
+        else { vb = '0 0 120 30'; w = 120; h = 30; inner = `<line x1="4" y1="15" x2="94" y2="15" stroke="${color}" stroke-width="4" stroke-linecap="round"/><polygon points="94,4 118,15 94,26" fill="${color}"/>`; }
+        const svg = `<svg viewBox="${vb}" preserveAspectRatio="none">${inner}</svg>`;
+        const html = `<span class="resizable-box" draggable="true" contenteditable="false" style="width:${w}px;height:${h}px;">${svg}</span>&nbsp;`;
+        memo.focus();
+        document.execCommand('insertHTML', false, html);
+        save(); updateCharCount();
+    }
+
+    function applyColorToSelectedShape() {
+        if (!selectedBox) return;
+        const svg = selectedBox.querySelector('svg');
+        if (!svg) return;
+        const color = document.getElementById('shape-color-input').value;
+        svg.querySelectorAll('[fill]').forEach(el => { if (el.getAttribute('fill') !== 'none') el.setAttribute('fill', color); });
+        svg.querySelectorAll('[stroke]').forEach(el => el.setAttribute('stroke', color));
+        save(); updateCharCount();
+    }
+
+    function triggerInsertChart() {
+        loadXLSX().then(() => document.getElementById('excel-chart-input').click())
+                  .catch(() => alert('グラフ機能の読み込みに失敗しました（ネットワーク接続を確認してください）'));
+    }
+    let xlsxLoadPromise = null;
+    function loadXLSX() {
+        if (window.XLSX) return Promise.resolve();
+        if (xlsxLoadPromise) return xlsxLoadPromise;
+        xlsxLoadPromise = new Promise((resolve, reject) => {
+            const s = document.createElement('script');
+            s.src = 'https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+            s.onload = resolve;
+            s.onerror = reject;
+            document.head.appendChild(s);
+        });
+        return xlsxLoadPromise;
+    }
+    function handleExcelChart(e) {
+        const file = e.target.files[0]; if (!file) return;
+        const reader = new FileReader();
+        reader.onload = function (ev) {
+            try {
+                const data = new Uint8Array(ev.target.result);
+                const workbook = XLSX.read(data, { type: 'array' });
+                const sheet = workbook.Sheets[workbook.SheetNames[0]];
+                const rows = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+                drawChartFromRows(rows);
+            } catch (err) { alert('ファイルの読み込みに失敗しました'); }
+        };
+        reader.readAsArrayBuffer(file);
+        e.target.value = '';
+    }
+    function drawChartFromRows(rows) {
+        const dataRows = rows.filter(r => r && r.length >= 2);
+        if (dataRows.length === 0) { alert('グラフ化できるデータが見つかりませんでした'); return; }
+        const startIdx = (typeof dataRows[0][1] !== 'number') ? 1 : 0;
+        const labels = [], values = [];
+        for (let i = startIdx; i < dataRows.length; i++) {
+            labels.push(String(dataRows[i][0]));
+            values.push(Number(dataRows[i][1]) || 0);
+        }
+        if (values.length === 0) { alert('グラフ化できるデータが見つかりませんでした'); return; }
+        const canvas = document.createElement('canvas');
+        canvas.width = 420; canvas.height = 260;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, 420, 260);
+        const max = Math.max(...values) * 1.1 || 1;
+        const barW = 340 / values.length;
+        ctx.strokeStyle = '#333'; ctx.beginPath(); ctx.moveTo(40, 10); ctx.lineTo(40, 220); ctx.lineTo(400, 220); ctx.stroke();
+        values.forEach((v, i) => {
+            const barH = (v / max) * 190;
+            const x = 50 + i * barW;
+            ctx.fillStyle = '#0078d4';
+            ctx.fillRect(x, 220 - barH, barW * 0.7, barH);
+            ctx.fillStyle = '#333'; ctx.font = '10px sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText(labels[i].slice(0, 6), x + barW * 0.35, 232);
+        });
+        const dataUrl = canvas.toDataURL('image/png');
+        memo.focus();
+        document.execCommand('insertHTML', false, `<span class="resizable-box" draggable="true" contenteditable="false" style="width:280px;height:173px;"><img src="${dataUrl}"></span>&nbsp;`);
+        save(); updateCharCount();
+    }
+
+    /* ================= 操作メニュー機能 ================= */
+    function toggleSelectionMode() {
+        selectionMode = !selectionMode;
+        document.getElementById('selection-mode-label').textContent = selectionMode ? '選択を終了' : '選択を開始';
+        memo.focus();
+    }
+    function moveOrExtend(direction) {
+        memo.focus();
+        const sel = window.getSelection();
+        const mode = selectionMode ? 'extend' : 'move';
+        if (direction === 'up') sel.modify(mode, 'backward', 'line');
+        else if (direction === 'down') sel.modify(mode, 'forward', 'line');
+        else if (direction === 'left') sel.modify(mode, 'backward', 'character');
+        else if (direction === 'right') sel.modify(mode, 'forward', 'character');
+    }
+    function doCut() { memo.focus(); document.execCommand('cut'); save(); updateCharCount(); }
+    function doCopy() { memo.focus(); document.execCommand('copy'); }
+    async function doPaste() {
+        memo.focus();
+        try {
+            const text = await navigator.clipboard.readText();
+            document.execCommand('insertText', false, text);
+        } catch (err) {
+            document.execCommand('paste');
+        }
+        save(); updateCharCount();
+    }
+    function doDelete() { memo.focus(); document.execCommand('delete'); save(); updateCharCount(); }
+
+    /* ================= 図形・画像：選択／移動／リサイズ ================= */
+    function selectResizableBox(box) {
+        if (selectedBox && selectedBox !== box) selectedBox.classList.remove('selected');
+        selectedBox = box;
+        box.classList.add('selected');
+        const handles = document.getElementById('shape-handles');
+        if (handles) handles.style.display = 'block';
+        positionHandles();
+    }
+    function deselectResizableBox() {
+        if (selectedBox) selectedBox.classList.remove('selected');
+        selectedBox = null;
+        const handles = document.getElementById('shape-handles');
+        if (handles) handles.style.display = 'none';
+    }
+    function positionHandles() {
+        if (!selectedBox) return;
+        const r = selectedBox.getBoundingClientRect();
+        const eH = document.querySelector('.rs-handle.e');
+        const sH = document.querySelector('.rs-handle.s');
+        const seH = document.querySelector('.rs-handle.se');
+        const rotH = document.querySelector('.rs-handle.rot');
+        if (!eH || !sH || !seH) return;
+        eH.style.left = r.right + 'px';
+        eH.style.top = (r.top + r.height / 2) + 'px';
+        sH.style.left = (r.left + r.width / 2) + 'px';
+        sH.style.top = r.bottom + 'px';
+        seH.style.left = r.right + 'px';
+        seH.style.top = r.bottom + 'px';
+        if (rotH) {
+            rotH.style.left = (r.left + r.width / 2) + 'px';
+            rotH.style.top = (r.top - 26) + 'px';
+        }
+    }
+
+    if (memo) {
+        memo.addEventListener('click', (e) => {
+            const box = e.target.closest('.resizable-box');
+            if (box) { e.stopPropagation(); selectResizableBox(box); }
+        });
+        memo.addEventListener('scroll', positionHandles);
+        memo.addEventListener('dragstart', (e) => {
+            const box = e.target.closest('.resizable-box');
+            if (box) { draggedBox = box; e.dataTransfer.effectAllowed = 'move'; }
+        });
+        memo.addEventListener('dragover', (e) => { if (draggedBox) e.preventDefault(); });
+        memo.addEventListener('drop', (e) => {
+            if (!draggedBox) return;
+            e.preventDefault();
+            let range = null;
+            if (document.caretRangeFromPoint) {
+                range = document.caretRangeFromPoint(e.clientX, e.clientY);
+            } else if (document.caretPositionFromPoint) {
+                const p = document.caretPositionFromPoint(e.clientX, e.clientY);
+                if (p) { range = document.createRange(); range.setStart(p.offsetNode, p.offset); }
+            }
+            if (range) {
+                draggedBox.remove();
+                range.insertNode(draggedBox);
+                selectResizableBox(draggedBox);
+            }
+            draggedBox = null;
+            save(); updateCharCount();
+        });
+    }
+    document.addEventListener('click', (e) => {
+        if (!e.target.closest('.resizable-box') && !e.target.closest('#shape-handles')) deselectResizableBox();
+    });
+    window.addEventListener('resize', positionHandles);
+
+    document.querySelectorAll('.rs-handle').forEach(h => {
+        h.addEventListener('pointerdown', (ev) => {
+            if (!selectedBox) return;
+            ev.preventDefault(); ev.stopPropagation();
+            h.setPointerCapture(ev.pointerId);
+            const pos = h.dataset.pos;
+
+            if (pos === 'rot') {
+                const rect = selectedBox.getBoundingClientRect();
+                const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+                function onMoveRot(e2) {
+                    const angle = Math.atan2(e2.clientY - cy, e2.clientX - cx) * 180 / Math.PI + 90;
+                    selectedBox.style.transform = `rotate(${angle}deg)`;
+                }
+                function onUpRot() {
+                    document.removeEventListener('pointermove', onMoveRot);
+                    document.removeEventListener('pointerup', onUpRot);
+                    positionHandles();
+                    save(); updateCharCount();
+                }
+                document.addEventListener('pointermove', onMoveRot);
+                document.addEventListener('pointerup', onUpRot);
+                return;
+            }
+
+            const startX = ev.clientX, startY = ev.clientY;
+            const startW = selectedBox.offsetWidth, startH = selectedBox.offsetHeight;
+            function onMove(e2) {
+                const dx = e2.clientX - startX, dy = e2.clientY - startY;
+                if (pos === 'e' || pos === 'se') selectedBox.style.width = Math.max(20, startW + dx) + 'px';
+                if (pos === 's' || pos === 'se') selectedBox.style.height = Math.max(20, startH + dy) + 'px';
+                positionHandles();
+            }
+            function onUp() {
+                document.removeEventListener('pointermove', onMove);
+                document.removeEventListener('pointerup', onUp);
+                save(); updateCharCount();
+            }
+            document.addEventListener('pointermove', onMove);
+            document.addEventListener('pointerup', onUp);
+        });
+    });
+
+    /* ================= ルーラー：ワードパット風インデントマーカー ================= */
+    let indentLeftPx = (typeof appSettings.indentLeft === 'number') ? appSettings.indentLeft : 20;
+    let indentRightPx = (typeof appSettings.indentRight === 'number') ? appSettings.indentRight : 20;
+
+    function positionRulerMarkers() {
+        const rulerBar = document.getElementById('ruler-bar');
+        const leftMarker = document.getElementById('ruler-marker-left');
+        const rightMarker = document.getElementById('ruler-marker-right');
+        if (!rulerBar || !leftMarker || !rightMarker) return;
+        const rulerWidth = rulerBar.clientWidth || 600;
+        leftMarker.style.left = indentLeftPx + 'px';
+        rightMarker.style.left = Math.max(indentLeftPx + 20, rulerWidth - indentRightPx) + 'px';
+    }
+    function applyIndent() {
+        if (!memo) return;
+        memo.style.paddingLeft = indentLeftPx + 'px';
+        memo.style.paddingRight = indentRightPx + 'px';
+        appSettings.indentLeft = indentLeftPx;
+        appSettings.indentRight = indentRightPx;
+        saveSettings();
+    }
+    function setupRulerDrag() {
+        const rulerBar = document.getElementById('ruler-bar');
+        const leftMarker = document.getElementById('ruler-marker-left');
+        const rightMarker = document.getElementById('ruler-marker-right');
+        if (!rulerBar || !leftMarker || !rightMarker) { applyIndent(); return; }
+        function bind(marker, isLeft) {
+            marker.addEventListener('pointerdown', (ev) => {
+                ev.preventDefault();
+                marker.setPointerCapture(ev.pointerId);
+                function onMove(e2) {
+                    const rect = rulerBar.getBoundingClientRect();
+                    const rulerWidth = rulerBar.clientWidth || 600;
+                    let x = e2.clientX - rect.left;
+                    if (isLeft) {
+                        indentLeftPx = Math.max(0, Math.min(x, rulerWidth - indentRightPx - 20));
+                    } else {
+                        indentRightPx = Math.max(0, Math.min(rulerWidth - x, rulerWidth - indentLeftPx - 20));
+                    }
+                    positionRulerMarkers();
+                    applyIndent();
+                }
+                function onUp() {
+                    marker.releasePointerCapture(ev.pointerId);
+                    document.removeEventListener('pointermove', onMove);
+                    document.removeEventListener('pointerup', onUp);
+                }
+                document.addEventListener('pointermove', onMove);
+                document.addEventListener('pointerup', onUp);
+            });
+        }
+        bind(leftMarker, true);
+        bind(rightMarker, false);
+        positionRulerMarkers();
+        applyIndent();
+    }
+
+    /* ================= タブモード（VSCode方式：タブ／分割／グループ化） ================= */
+    let tabState = JSON.parse(localStorage.getItem('tab_state_v1')) || {
+        enabled: false,
+        main: { tabs: [], active: -1 },
+        split: null
+    };
+    if (!tabState.main) tabState.main = { tabs: [], active: -1 };
+    function saveTabState() { localStorage.setItem('tab_state_v1', JSON.stringify(tabState)); }
+
+    function initTabMode() {
+        renderTabBar();
+        if (tabState.split && tabState.split.tabs.length) {
+            const item = getPaneActiveItem('split');
+            if (item) loadSplitPane(item);
+        }
+    }
+
+    function toggleTabMode() {
+        tabState.enabled = !tabState.enabled;
+        if (tabState.enabled && currentPath.file && tabState.main.tabs.length === 0) {
+            tabState.main.tabs.push({ folder: currentPath.folder, file: currentPath.file });
+            tabState.main.active = 0;
+        }
+        saveTabState();
+        renderTabBar();
+        refreshMenuStates();
+    }
+
+    function getPaneActiveItem(paneKey) {
+        const pane = tabState[paneKey];
+        if (!pane || pane.active < 0) return null;
+        const t = pane.tabs[pane.active];
+        if (!t) return null;
+        if (t.type === 'group') return t.items[t.active] || null;
+        return t;
+    }
+
+    function loadIntoPane(paneKey, item) {
+        if (!item) return;
+        if (paneKey === 'main') {
+            selectFile(item.folder, item.file);
+        } else {
+            loadSplitPane(item);
+        }
+    }
+
+    function reconcilePaneActive(paneKey) {
+        const pane = tabState[paneKey];
+        if (!pane) return;
+        if (pane.tabs.length === 0) {
+            pane.active = -1;
+            if (paneKey === 'main') {
+                resetEditor();
+            } else if (paneKey === 'split') {
+                tabState.split = null;
+                document.getElementById('split-pane').classList.remove('show');
+            }
+            return;
+        }
+        if (pane.active < 0 || pane.active >= pane.tabs.length) pane.active = 0;
+        const item = getPaneActiveItem(paneKey);
+        if (item) loadIntoPane(paneKey, item);
+    }
+
+    function ensureTabOpen(paneKey, folder, file) {
+        const pane = tabState[paneKey];
+        for (let i = 0; i < pane.tabs.length; i++) {
+            const t = pane.tabs[i];
+            if (t.type === 'group') {
+                const subIdx = t.items.findIndex(x => x.folder === folder && x.file === file);
+                if (subIdx !== -1) { t.active = subIdx; pane.active = i; saveTabState(); renderTabBar(); return; }
+            } else if (t.folder === folder && t.file === file) {
+                pane.active = i; saveTabState(); renderTabBar(); return;
+            }
+        }
+        pane.tabs.push({ folder, file });
+        pane.active = pane.tabs.length - 1;
+        saveTabState();
+        renderTabBar();
+    }
+
+    function activateTab(paneKey, idx) {
+        tabState[paneKey].active = idx;
+        saveTabState();
+        loadIntoPane(paneKey, getPaneActiveItem(paneKey));
+        renderTabBar();
+    }
+    function activateGroupItem(paneKey, groupIdx, subIdx) {
+        const group = tabState[paneKey].tabs[groupIdx];
+        group.active = subIdx;
+        tabState[paneKey].active = groupIdx;
+        saveTabState();
+        loadIntoPane(paneKey, group.items[subIdx]);
+        renderTabBar();
+    }
+    function closeTab(paneKey, idx) {
+        const pane = tabState[paneKey];
+        const wasActive = (pane.active === idx);
+        pane.tabs.splice(idx, 1);
+        if (pane.active > idx) pane.active--;
+        else if (wasActive) pane.active = Math.min(idx, pane.tabs.length - 1);
+        saveTabState();
+        if (paneKey === 'split' && pane.tabs.length === 0) {
+            tabState.split = null;
+            document.getElementById('split-pane').classList.remove('show');
+        } else if (wasActive) {
+            reconcilePaneActive(paneKey);
+        }
+        renderTabBar();
+    }
+    function closeGroupItem(paneKey, groupIdx, subIdx) {
+        const pane = tabState[paneKey];
+        const group = pane.tabs[groupIdx];
+        const wasActiveGroup = (pane.active === groupIdx);
+        const wasActiveItem = (group.active === subIdx);
+        group.items.splice(subIdx, 1);
+        if (group.active > subIdx) group.active--;
+        else if (wasActiveItem) group.active = Math.min(subIdx, group.items.length - 1);
+        if (group.items.length === 0) {
+            pane.tabs.splice(groupIdx, 1);
+            if (pane.active > groupIdx) pane.active--;
+            else if (wasActiveGroup) pane.active = Math.min(groupIdx, pane.tabs.length - 1);
+        }
+        saveTabState();
+        if (wasActiveGroup) reconcilePaneActive(paneKey);
+        renderTabBar();
+    }
+    function ungroupTabItem(paneKey, groupIdx, subIdx) {
+        const pane = tabState[paneKey];
+        const group = pane.tabs[groupIdx];
+        const [item] = group.items.splice(subIdx, 1);
+        if (group.active >= group.items.length) group.active = group.items.length - 1;
+        if (group.items.length === 0) pane.tabs.splice(groupIdx, 1);
+        pane.tabs.push(item);
+        pane.active = pane.tabs.length - 1;
+        saveTabState();
+        loadIntoPane(paneKey, item);
+        renderTabBar();
+    }
+    function unsplitTab(idx, subIdx) {
+        const pane = tabState.split;
+        if (!pane) return;
+        const entry = pane.tabs[idx];
+        let item;
+        if (subIdx === null || subIdx === undefined) {
+            item = entry;
+            pane.tabs.splice(idx, 1);
+        } else {
+            item = entry.items[subIdx];
+            entry.items.splice(subIdx, 1);
+            if (entry.items.length === 0) pane.tabs.splice(idx, 1);
+            else if (entry.active >= entry.items.length) entry.active = entry.items.length - 1;
+        }
+        if (pane.active >= pane.tabs.length) pane.active = pane.tabs.length - 1;
+        tabState.main.tabs.push(item);
+        tabState.main.active = tabState.main.tabs.length - 1;
+        if (pane.tabs.length === 0) {
+            tabState.split = null;
+            document.getElementById('split-pane').classList.remove('show');
+        }
+        saveTabState();
+        selectFile(item.folder, item.file);
+        renderTabBar();
+    }
+
+    function getAllOpenTabsFlat() {
+        const result = [];
+        ['main', 'split'].forEach(pk => {
+            const pane = tabState[pk];
+            if (!pane) return;
+            pane.tabs.forEach(t => {
+                if (t.type === 'group') t.items.forEach(it => result.push(it));
+                else result.push(t);
+            });
+        });
+        const seen = new Set();
+        return result.filter(t => {
+            const k = t.folder + '/' + t.file;
+            if (seen.has(k)) return false;
+            seen.add(k);
+            return true;
+        });
+    }
+    function removeTabEverywhereAndReconcile(folder, file) {
+        let touchedMain = false, touchedSplit = false;
+        ['main', 'split'].forEach(pk => {
+            const pane = tabState[pk];
+            if (!pane) return;
+            for (let i = pane.tabs.length - 1; i >= 0; i--) {
+                const t = pane.tabs[i];
+                if (t.type === 'group') {
+                    const subIdx = t.items.findIndex(x => x.folder === folder && x.file === file);
+                    if (subIdx !== -1) {
+                        const wasActive = (pane.active === i && t.active === subIdx);
+                        t.items.splice(subIdx, 1);
+                        if (t.active >= t.items.length) t.active = t.items.length - 1;
+                        if (t.items.length === 0) {
+                            pane.tabs.splice(i, 1);
+                            if (pane.active >= pane.tabs.length) pane.active = pane.tabs.length - 1;
+                        }
+                        if (wasActive) { if (pk === 'main') touchedMain = true; else touchedSplit = true; }
+                    }
+                } else if (t.folder === folder && t.file === file) {
+                    const wasActive = (pane.active === i);
+                    pane.tabs.splice(i, 1);
+                    if (pane.active > i) pane.active--;
+                    else if (wasActive) pane.active = Math.min(i, pane.tabs.length - 1);
+                    if (wasActive) { if (pk === 'main') touchedMain = true; else touchedSplit = true; }
+                }
+            }
+        });
+        saveTabState();
+        if (touchedSplit) reconcilePaneActive('split');
+        if (touchedMain && tabState.enabled) reconcilePaneActive('main');
+        renderTabBar();
+    }
+
+    function loadSplitPane(item) {
+        if (!tabState.split) tabState.split = { tabs: [], active: -1 };
+        tabState.split.currentItem = item;
+        const el = document.getElementById('split-memo');
+        el.innerHTML = getFileContent(item.folder, item.file);
+        document.getElementById('split-pane').classList.add('show');
+    }
+
+    function requestSplitEditor() {
+        if (!tabState.enabled) toggleTabMode();
+        openTilePicker(getAllOpenTabsFlat(), (picked) => {
+            removeTabEverywhereAndReconcile(picked.folder, picked.file);
+            if (!tabState.split) tabState.split = { tabs: [], active: -1 };
+            tabState.split.tabs.push({ folder: picked.folder, file: picked.file });
+            tabState.split.active = tabState.split.tabs.length - 1;
+            saveTabState();
+            loadSplitPane(picked);
+            renderTabBar();
+            closeTilePicker();
+        }, 'このファイルを分割ビューに表示');
+    }
+
+    function pickRandomGroupColor() {
+        const colors = ['#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c', '#e67e22'];
+        return colors[Math.floor(Math.random() * colors.length)];
+    }
+    function openGroupCreation(paneKey) {
+        openTilePicker(getAllOpenTabsFlat(), (picked) => {
+            removeTabEverywhereAndReconcile(picked.folder, picked.file);
+            const color = pickRandomGroupColor();
+            tabState[paneKey].tabs.push({ type: 'group', id: 'g' + Date.now(), color, name: '', items: [picked], active: 0 });
+            tabState[paneKey].active = tabState[paneKey].tabs.length - 1;
+            saveTabState();
+            loadIntoPane(paneKey, picked);
+            renderTabBar();
+            closeTilePicker();
+        }, 'グループに追加するタブを選択');
+    }
+    function openTilePickerForGroup(paneKey, groupIdx) {
+        openTilePicker(getAllOpenTabsFlat(), (picked) => {
+            removeTabEverywhereAndReconcile(picked.folder, picked.file);
+            const group = tabState[paneKey].tabs[groupIdx];
+            group.items.push(picked);
+            group.active = group.items.length - 1;
+            tabState[paneKey].active = groupIdx;
+            saveTabState();
+            loadIntoPane(paneKey, picked);
+            renderTabBar();
+            closeTilePicker();
+        }, 'グループに追加するタブを選択');
+    }
+
+    /* ---- タイル状の選択モーダル（分割・グループ化で共用） ---- */
+    function openTilePicker(items, onPick, title) {
+        document.getElementById('tile-picker-title').textContent = title || 'ファイルを選択';
+        const grid = document.getElementById('tile-picker-grid');
+        grid.innerHTML = '';
+        if (!items.length) {
+            grid.innerHTML = '<div style="grid-column: 1/-1; text-align:center; color:#888; font-size:13px;">対象がありません（先にファイルをタブで開いてください）</div>';
+        }
+        items.forEach(item => {
+            const tile = document.createElement('div');
+            tile.className = 'tile-item';
+            tile.textContent = item.file;
+            tile.onclick = () => onPick(item);
+            grid.appendChild(tile);
+        });
+        document.getElementById('tile-picker-modal').style.display = 'flex';
+    }
+    function closeTilePicker() {
+        document.getElementById('tile-picker-modal').style.display = 'none';
+    }
+
+    /* ---- タブバー描画 ---- */
+    function renderTabBar() {
+        const bar = document.getElementById('tab-bar');
+        bar.style.display = tabState.enabled ? 'flex' : 'none';
+        renderTabStrip('main');
+        const splitStripEl = document.getElementById('tab-strip-split');
+        const dividerEl = document.getElementById('tab-strip-divider');
+        if (tabState.split && tabState.split.tabs.length) {
+            splitStripEl.style.display = 'flex';
+            dividerEl.style.display = 'block';
+            renderTabStrip('split');
+        } else {
+            splitStripEl.style.display = 'none';
+            dividerEl.style.display = 'none';
+        }
+    }
+    function renderTabStrip(paneKey) {
+        const pane = tabState[paneKey];
+        const el = document.getElementById(paneKey === 'main' ? 'tab-strip-main' : 'tab-strip-split');
+        el.innerHTML = '';
+        pane.tabs.forEach((item, idx) => {
+            if (item.type === 'group') {
+                el.appendChild(renderGroupEl(paneKey, item, idx));
+            } else {
+                el.appendChild(renderTabEl(paneKey, item, idx, idx === pane.active));
+            }
+        });
+    }
+    function renderTabEl(paneKey, item, idx, isActive) {
+        const div = document.createElement('div');
+        div.className = 'tab' + (isActive ? ' active' : '');
+        div.onclick = () => activateTab(paneKey, idx);
+        div.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); showTabContextMenu(e, paneKey, idx, null); };
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = item.file;
+        const closeSpan = document.createElement('span');
+        closeSpan.className = 'tab-close';
+        closeSpan.textContent = '✕';
+        closeSpan.onclick = (e) => { e.stopPropagation(); closeTab(paneKey, idx); };
+        div.appendChild(nameSpan);
+        div.appendChild(closeSpan);
+        return div;
+    }
+    function renderGroupEl(paneKey, group, idx) {
+        const wrap = document.createElement('div');
+        wrap.className = 'tab-group';
+        wrap.style.background = (group.color || '#888888') + '2b';
+        wrap.style.border = '1px solid ' + (group.color || '#888888');
+
+        const colorInput = document.createElement('input');
+        colorInput.type = 'color';
+        colorInput.className = 'group-color-input';
+        colorInput.value = group.color || '#888888';
+        colorInput.onclick = (e) => e.stopPropagation();
+        colorInput.onchange = (e) => { group.color = e.target.value; saveTabState(); renderTabBar(); };
+        wrap.appendChild(colorInput);
+
+        group.items.forEach((item, subIdx) => {
+            const t = document.createElement('div');
+            t.className = 'tab' + ((idx === tabState[paneKey].active && group.active === subIdx) ? ' active' : '');
+            t.onclick = () => activateGroupItem(paneKey, idx, subIdx);
+            t.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); showTabContextMenu(e, paneKey, idx, subIdx); };
+            const nameSpan = document.createElement('span');
+            nameSpan.textContent = item.file;
+            const closeSpan = document.createElement('span');
+            closeSpan.className = 'tab-close';
+            closeSpan.textContent = '✕';
+            closeSpan.onclick = (e) => { e.stopPropagation(); closeGroupItem(paneKey, idx, subIdx); };
+            t.appendChild(nameSpan);
+            t.appendChild(closeSpan);
+            wrap.appendChild(t);
+        });
+
+        const addBtn = document.createElement('div');
+        addBtn.className = 'group-add';
+        addBtn.textContent = '＋';
+        addBtn.onclick = (e) => { e.stopPropagation(); openTilePickerForGroup(paneKey, idx); };
+        wrap.appendChild(addBtn);
+        return wrap;
+    }
+
+    /* ---- 右クリックメニュー ---- */
+    function showTabBarContextMenu(e, paneKey) {
+        const html = `<button onclick="hideContextMenu(); openGroupCreation('${paneKey}')">タブをグループ化する</button>`;
+        showContextMenu(e.clientX, e.clientY, html);
+    }
+    function showTabContextMenu(e, paneKey, idx, subIdx) {
+        const pane = tabState[paneKey];
+        const item = pane.tabs[idx];
+        const isGroup = item.type === 'group';
+        let html = '';
+        if (!isGroup) {
+            html += `<button onclick="hideContextMenu(); closeTab('${paneKey}', ${idx})">閉じる</button>`;
+        } else {
+            html += `<button onclick="hideContextMenu(); closeGroupItem('${paneKey}', ${idx}, ${subIdx})">閉じる</button>`;
+            html += `<button onclick="hideContextMenu(); ungroupTabItem('${paneKey}', ${idx}, ${subIdx})">グループから外す</button>`;
+        }
+        if (paneKey === 'split') {
+            html += `<button onclick="hideContextMenu(); unsplitTab(${idx}, ${subIdx === null ? 'null' : subIdx})">解除する（分割を戻す）</button>`;
+        }
+        showContextMenu(e.clientX, e.clientY, html);
+    }
+
+    /* ================= 初期化 ================= */
+    window.onload = () => {
+        document.body.classList.toggle('dark-mode', !!appSettings.darkMode);
+        renderRuler();
+        applySettingsToEditor();
+        refreshMenuStates();
+        setupRulerDrag();
+        renderTree();
+        if (currentPath.file) selectFile(currentPath.folder, currentPath.file);
+        updateLineNumbers();
+        initTabMode();
+    };
+</script>
+</body>
+</html>
